@@ -1,0 +1,21 @@
+// MarkdownLint 配置：中文文档行较长，放宽与中文排版相关的规则
+{
+  "config": {
+    "MD013": false,
+    "MD024": false,
+    "MD025": false,
+    "MD029": false,
+    "MD033": false,
+    "MD036": false,
+    "MD041": false
+  },
+  "globs": ["**/*.md"],
+  // maa-sdk 为 fetch-sdk 下载的第三方依赖文档，不属于本项目，不参与 lint
+  "ignores": [
+    "node_modules/**",
+    "target/**",
+    "dist/**",
+    ".git/**",
+    "maa-sdk/**"
+  ]
+}

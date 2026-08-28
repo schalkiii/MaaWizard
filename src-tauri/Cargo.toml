@@ -1,0 +1,30 @@
+[package]
+name = "maa-wizard"
+version = "0.1.0"
+description = "MaaWizard - 基于 MaaFramework 的可视化录制与自动化运行工具"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "maa_wizard_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# dynamic 链接模式：编译期不链接 MaaFramework，运行期由 load_library 加载官方 DLL
+# 因此 cargo check/build 不需要 SDK，仅实际运行任务时需要
+maa-framework = { version = "1", features = ["dynamic"] }
+
+# 录制引擎：inputbot 监听全局键鼠，scrap 截屏，image 做 ROI 裁剪与模板保存
+# strum 需与 inputbot 依赖的同版本，才能用 IntoEnumIterator 遍历全部按键
+inputbot = "0.6"
+scrap = "0.5"
+image = "0.25"
+chrono = "0.4"
+strum = "0.25"

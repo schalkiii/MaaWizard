@@ -1,0 +1,229 @@
+use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter, State};
+
+use crate::ai;
+use crate::capture;
+use crate::device;
+use crate::maa::{resolve_existing_path_allow_missing, AdbDeviceInfo, MaaRuntime};
+use crate::pipeline::{NextEntry, PipelineState, PipelineVersion};
+use crate::recorder::{RecordMode, RecorderState, RecordedStep};
+
+/* ---------------- M0 运行时 ---------------- */
+
+#[tauri::command]
+pub fn maa_load_library(runtime: State<'_, MaaRuntime>, dll_path: String) -> Result<String, String> {
+    runtime.load_library(&dll_path)
+}
+
+#[tauri::command]
+pub fn maa_find_adb_devices(runtime: State<'_, MaaRuntime>) -> Result<Vec<AdbDeviceInfo>, String> {
+    runtime.find_adb_devices()
+}
+
+#[tauri::command]
+pub fn maa_connect_adb(
+    runtime: State<'_, MaaRuntime>,
+    adb_path: String,
+    address: String,
+    config: String,
+) -> Result<String, String> {
+    runtime.connect_adb(&adb_path, &address, &config)
+}
+
+#[tauri::command]
+pub fn maa_connect_win32(runtime: State<'_, MaaRuntime>, hwnd: i64) -> Result<String, String> {
+    runtime.connect_win32(hwnd)
+}
+
+#[tauri::command]
+pub fn maa_load_resource(runtime: State<'_, MaaRuntime>, path: String) -> Result<String, String> {
+    runtime.load_resource(&path)
+}
+
+/// 运行任务；同时注册事件回调把节点执行状态推送给前端（阶段 4 调试回显）
+#[tauri::command]
+pub async fn maa_run_task(
+    app: AppHandle,
+    runtime: State<'_, MaaRuntime>,
+    entry: String,
+) -> Result<String, String> {
+    let tasker = runtime.tasker_clone()?;
+
+    // Tasker 的 sink 会收到每个节点的识别/动作事件，转发为前端事件用于高亮
+    let event_app = app.clone();
+    let _ = tasker.add_sink(move |message: &str, detail: &str| {
+        let _ = event_app.emit(
+            "maa://event",
+            json!({ "message": message, "detail": detail }),
+        );
+    });
+
+    tauri::async_runtime::spawn_blocking(move || MaaRuntime::run_task_blocking(tasker, &entry))
+        .await
+        .map_err(|e| format!("任务线程异常: {}", e))?
+}
+
+#[tauri::command]
+pub fn maa_stop(runtime: State<'_, MaaRuntime>) -> Result<String, String> {
+    runtime.stop()
+}
+
+#[tauri::command]
+pub fn maa_status(runtime: State<'_, MaaRuntime>) -> Result<String, String> {
+    runtime.status()
+}
+
+/* ---------------- M1 图编辑器 ---------------- */
+
+#[tauri::command]
+pub fn pipeline_open(pipeline: State<'_, PipelineState>, path: String) -> Result<String, String> {
+    pipeline.open(&path)
+}
+
+#[tauri::command]
+pub fn pipeline_save(
+    pipeline: State<'_, PipelineState>,
+    path: Option<String>,
+    version: Option<String>,
+) -> Result<String, String> {
+    let version = match version {
+        Some(text) => PipelineVersion::from_str_checked(&text)?,
+        None => PipelineVersion::V2,
+    };
+    pipeline.save(path, version)
+}
+
+#[tauri::command]
+pub fn pipeline_get(pipeline: State<'_, PipelineState>) -> Result<Value, String> {
+    pipeline.snapshot()
+}
+
+#[tauri::command]
+pub fn pipeline_update_node(
+    pipeline: State<'_, PipelineState>,
+    name: String,
+    node: Value,
+) -> Result<String, String> {
+    pipeline.update_node(&name, node)
+}
+
+#[tauri::command]
+pub fn pipeline_add_node(
+    pipeline: State<'_, PipelineState>,
+    name: Option<String>,
+) -> Result<String, String> {
+    pipeline.add_node(name)
+}
+
+#[tauri::command]
+pub fn pipeline_delete_node(
+    pipeline: State<'_, PipelineState>,
+    name: String,
+) -> Result<String, String> {
+    pipeline.delete_node(&name)
+}
+
+/* ---------------- M2/M3 录制与模板抓取 ---------------- */
+
+#[tauri::command]
+pub fn recorder_start(
+    recorder: State<'_, RecorderState>,
+    mode: String,
+    resource_dir: String,
+) -> Result<String, String> {
+    recorder.start(RecordMode::parse(&mode), &resource_dir)
+}
+
+/// 停止录制并返回录到的步骤，供前端预览后决定是否写入 pipeline
+#[tauri::command]
+pub fn recorder_stop(recorder: State<'_, RecorderState>) -> Result<Vec<RecordedStep>, String> {
+    recorder.stop()
+}
+
+#[tauri::command]
+pub fn recorder_status(recorder: State<'_, RecorderState>) -> Result<bool, String> {
+    Ok(recorder.is_recording())
+}
+
+/// 把录制步骤转换为节点并串联写入 PipelineDocument —— 录完即得到 pipeline
+#[tauri::command]
+pub fn recorder_commit(
+    pipeline: State<'_, PipelineState>,
+    recorder: State<'_, RecorderState>,
+) -> Result<String, String> {
+    let steps = recorder.stop()?;
+    let nodes = crate::recorder::steps_to_nodes(&steps);
+    if nodes.is_empty() {
+        return Err("没有录制到任何操作".to_string());
+    }
+
+    let mut document = pipeline.document_guard()?;
+    let mut previous: Option<String> = None;
+    let mut added = 0usize;
+
+    for node in nodes {
+        let name = document.unique_name("Step");
+        // 用 next 把节点按录制顺序串成链
+        if let Some(previous_name) = &previous {
+            if let Some(previous_node) = document.nodes.get_mut(previous_name) {
+                previous_node.next = vec![NextEntry::Name(name.clone())];
+            }
+        }
+        document.nodes.insert(name.clone(), node);
+        previous = Some(name);
+        added += 1;
+    }
+
+    Ok(format!("已生成 {} 个节点并按录制顺序串联", added))
+}
+
+/// 按矩形抓取模板图，用于编辑器中的 ROI 框选（M3）
+#[tauri::command]
+pub fn capture_grab_template(
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    resource_dir: String,
+) -> Result<Value, String> {
+    let screen = capture::capture_desktop()?;
+    let (image, roi) = capture::crop_rect(&screen, x, y, width, height).ok_or("裁剪区域无效")?;
+
+    let directory = resolve_existing_path_allow_missing(&resource_dir);
+    let file_name = format!("roi_{}.png", chrono::Utc::now().timestamp_millis());
+    let path = directory.join("image").join(&file_name);
+    capture::save_template(&image, &path)?;
+
+    Ok(json!({ "file": file_name, "roi": roi }))
+}
+
+/// 截屏保存到指定路径，便于前端显示后做可视化框选
+#[tauri::command]
+pub fn capture_screenshot(output: String) -> Result<String, String> {
+    let path = resolve_existing_path_allow_missing(&output);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let screen = capture::capture_desktop()?;
+    capture::save_template(&screen, &path)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/* ---------------- M4 设备管理 ---------------- */
+
+#[tauri::command]
+pub fn device_list_windows() -> Result<Vec<device::WindowInfo>, String> {
+    device::list_windows()
+}
+
+/* ---------------- M5 AI 增强 ---------------- */
+
+#[tauri::command]
+pub fn ai_detect() -> Result<ai::AiEnvironment, String> {
+    Ok(ai::detect_environment())
+}
+
+#[tauri::command]
+pub fn ai_run(program: String, args: Vec<String>) -> Result<String, String> {
+    ai::run_tool(program, args)
+}

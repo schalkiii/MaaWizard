@@ -1,0 +1,32 @@
+{
+  "name": "maa-wizard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MaaWizard - 基于 MaaFramework 的可视化录制与自动化运行工具",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "lint:md": "markdownlint-cli2",
+    "lint:ts": "vue-tsc --noEmit",
+    "lint:rust": "cd src-tauri && cargo clippy",
+    "lint": "npm run lint:md && npm run lint:ts && npm run lint:rust",
+    "test:rust": "cd src-tauri && cargo test",
+    "test": "npm run test:rust"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@vue-flow/core": "^1.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@vitejs/plugin-vue": "^5",
+    "markdownlint-cli2": "^0.23.0",
+    "typescript": "^5",
+    "vite": "^6",
+    "vue": "^3",
+    "vue-tsc": "^2"
+  }
+}

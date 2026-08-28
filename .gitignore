@@ -1,0 +1,23 @@
+# 前端
+node_modules/
+dist/
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# 运行时 SDK（make fetch-sdk 下载，体积大且为第三方产物）
+maa-sdk/
+
+# 本地工作数据
+.codebuddy/
+*.log
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 截图临时文件
+resource/.screenshot.png
