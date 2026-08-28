@@ -9,8 +9,9 @@ src-tauri/gen/
 # 运行时 SDK（make fetch-sdk 下载，体积大且为第三方产物）
 maa-sdk/
 
-# 本地工作数据
-.codebuddy/
+# 本地工作数据（memory 目录纳入版本管理，其余忽略）
+.codebuddy/*
+!.codebuddy/memory/
 *.log
 
 # 编辑器 / 系统
