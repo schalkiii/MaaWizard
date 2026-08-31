@@ -82,13 +82,14 @@ the graph editor renders a snapshot of it, and every edit is committed back thro
 - `docs/CONTEXT.md` — MaaFramework domain glossary (Chinese)
 - `docs/test-plan.md` — testing strategy (Chinese)
 - `docs/adr/` — architecture decision records
+- `docs/验收清单.md` — 真机手动验收步骤
 - `docs/handoff-2026-08-28.md` — session handoff notes
 
 ## Development
 
 ```bash
 make lint     # markdownlint + vue-tsc + cargo clippy
-make test     # cargo test (38) + vitest (34)
+make test     # cargo test + vitest run（全部测试套件需全绿）
 make check    # fast cargo check
 ```
 

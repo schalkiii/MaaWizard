@@ -41,13 +41,6 @@ test-rust:
 test-web:
 	npx vitest run
 
-deps:
-	npm install
-
-# 仅检查 Rust 侧能否编译，不涉及链接，用于快速迭代 M0 运行时封装
-check:
-	cd src-tauri && cargo check
-
 dev:
 	npm run tauri dev
 

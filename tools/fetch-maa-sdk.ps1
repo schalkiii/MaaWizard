@@ -11,7 +11,9 @@ maa_framework::load_library 加载 MaaFramework.dll，因此首次运行前需�
 #>
 [CmdletBinding()]
 param(
-    [string]$Version = "latest"
+    [string]$Version = "latest",
+    # GitHub Release 直连常超时，默认为下载 URL 拼接镜像前缀（形如 https://ghfast.top/）；置空则直连
+    [string]$Mirror = "https://ghfast.top/"
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,9 +45,28 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $sdkDir = Join-Path $repoRoot "maa-sdk"
 $zipPath = Join-Path $env:TEMP $asset.name
 
-Write-Host "下载 $($asset.name) ($([math]::Round($asset.size / 1MB, 1)) MB) ..."
+$downloadUrl = if ($Mirror) { "$Mirror$($asset.browser_download_url)" } else { $asset.browser_download_url }
+
+# 网络不稳定：用 curl 断点续传 + 自动重试（单次最多 600s，失败即续传），镜像优先、直连兜底。
+function Get-Zip($label, $url, $out) {
+    if (Test-Path $out) { Write-Host "[$label] 检测到已有文件 $((Get-Item $out).Length) 字节，尝试断点续传" }
+    for ($i = 1; $i -le 200; $i++) {
+        & curl.exe -L -C - --retry 1 --max-time 600 -o $out $url
+        if ($LASTEXITCODE -eq 0) { return $true }
+        Write-Host "[$label] 第 $i 次尝试中断（exit=$LASTEXITCODE），3s 后续传..."
+        Start-Sleep -Seconds 3
+    }
+    return $false
+}
+
+Write-Host "下载 $($asset.name) ($([math]::Round($asset.size / 1MB, 1)) MB)，来源: $downloadUrl ..."
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+$ok = Get-Zip 'SDK' $downloadUrl $zipPath
+if (-not $ok) {
+    Write-Warning "镜像下载失败，回退直连 $($asset.browser_download_url)"
+    $ok = Get-Zip 'SDK-direct' $asset.browser_download_url $zipPath
+}
+if (-not $ok) { throw "MaaFramework 运行时下载失败，请检查网络或手动下载 $($asset.browser_download_url) 到 $zipPath" }
 
 Write-Host "解压到 $sdkDir ..."
 if (Test-Path $sdkDir) { Remove-Item -Recurse -Force $sdkDir }
