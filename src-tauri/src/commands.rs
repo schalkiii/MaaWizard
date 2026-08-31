@@ -4,7 +4,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::ai;
 use crate::capture;
 use crate::device;
-use crate::maa::{resolve_existing_path_allow_missing, AdbDeviceInfo, MaaRuntime};
+use crate::maa::{resolve_existing_path, resolve_existing_path_allow_missing, AdbDeviceInfo, MaaRuntime};
 use crate::pipeline::{NextEntry, PipelineState, PipelineVersion, ValidationIssue};
 use crate::recorder::{RecordMode, RecorderState, RecordedStep};
 
@@ -288,6 +288,56 @@ pub fn capture_screenshot(output: String) -> Result<String, String> {
 pub fn device_list_windows(runtime: State<'_, MaaRuntime>) -> Result<Vec<device::WindowInfo>, String> {
     runtime.ensure_loaded()?;
     device::list_windows()
+}
+
+/* ---------------- 资源与模板 ---------------- */
+
+/// 列出可选的资源包目录：默认 `resource` 本身，加上它下面的一级子目录
+/// （每个子目录通常是一个 Maa 资源包，内含 pipeline/ 与 image/）。
+#[tauri::command]
+pub fn list_resources() -> Result<Vec<String>, String> {
+    let root = resolve_existing_path("resource");
+    let mut dirs = vec!["resource".to_string()];
+    if root.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        dirs.push(format!("resource/{}", name));
+                    }
+                }
+            }
+        }
+    }
+    Ok(dirs)
+}
+
+/// 解析模板匹配用到的模板图片真实路径。模板名在 pipeline 里通常不带扩展名，
+/// 这里按常见扩展名依次尝试，便于前端直接展示「模板匹配到底匹配的是哪张图」。
+#[tauri::command]
+pub fn template_image(resource_dir: String, template: String) -> Result<String, String> {
+    let root = resolve_existing_path(&resource_dir);
+    let image_dir = root.join("image");
+    let bases: Vec<std::path::PathBuf> = if image_dir.is_dir() {
+        vec![image_dir.clone()]
+    } else {
+        vec![root.clone()]
+    };
+    let exts = ["", ".png", ".jpg", ".jpeg", ".bmp"];
+    for base in &bases {
+        for ext in exts {
+            let candidate = base.join(format!("{}{}", template, ext));
+            if candidate.is_file() {
+                return Ok(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+    Err(format!(
+        "找不到模板图片：{}/image/{}（已尝试 png/jpg/jpeg/bmp）",
+        root.display(),
+        template
+    ))
 }
 
 /* ---------------- M5 AI 增强 ---------------- */

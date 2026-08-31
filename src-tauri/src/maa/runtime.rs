@@ -6,15 +6,18 @@ use std::time::Duration;
 use maa_framework::controller::Controller;
 use maa_framework::resource::Resource;
 use maa_framework::sys::{
-    MaaWin32InputMethod as Win32InputMethod, MaaWin32ScreencapMethod as Win32ScreencapMethod,
+    MaaWin32InputMethod as Win32InputMethod, MaaWin32InputMethod_Seize,
+    MaaWin32ScreencapMethod as Win32ScreencapMethod, MaaWin32ScreencapMethod_All,
 };
 use maa_framework::tasker::Tasker;
 use maa_framework::toolkit::Toolkit;
 use serde::Serialize;
 
-/// 传 0 表示由 MaaFramework 自行选择 Win32 的截图/键鼠实现方式
-const WIN32_SCREENCAP_AUTO: Win32ScreencapMethod = 0;
-const WIN32_INPUT_AUTO: Win32InputMethod = 0;
+/// Win32 截图/键鼠方式：注意 MaaFramework 里「传 0 = None（不启用任何方式）」，并不是
+/// "自动"，传 0 会导致连接看似成功但 post_screencap 永远失败（cache 为空，报 status 0）。
+/// 因此截图用 All（-1，框架自动挑选最快可用方法），键鼠用 Seize（无需管理员、兼容性好）。
+const WIN32_SCREENCAP_AUTO: Win32ScreencapMethod = MaaWin32ScreencapMethod_All as Win32ScreencapMethod;
+const WIN32_INPUT_AUTO: Win32InputMethod = MaaWin32InputMethod_Seize as Win32InputMethod;
 
 /// 资源加载为异步操作，这里轮询等待其完成：200 × 50ms = 最多 10 秒
 const RESOURCE_LOAD_MAX_POLL: u32 = 200;
@@ -218,10 +221,15 @@ impl MaaRuntime {
     /// 若尚未连接控制器则返回错误提示。
     pub fn controller_screenshot(&self, output: &str) -> Result<String, String> {
         let controller = self.lock()?.controller.clone().ok_or("尚未连接控制器")?;
+        if !controller.connected() {
+            return Err("控制器未连接，请先在设备页连接窗口/设备".to_string());
+        }
         // 先触发一次截屏，wait 完成后再取缓存帧，保证拿到的是最新画面
         let job = controller.post_screencap().map_err(|e| e.to_string())?;
         let _ = controller.wait(job);
-        let image = controller.cached_image().map_err(|e| e.to_string())?;
+        let image = controller.cached_image().map_err(|_| {
+            "截图失败：控制器缓存为空。请确认目标窗口可见、未被最小化，且截图方式可用".to_string()
+        })?;
         let path = resolve_existing_path_allow_missing(output);
         crate::capture::save_maa_image(&image, &path)?;
         Ok(path.to_string_lossy().to_string())

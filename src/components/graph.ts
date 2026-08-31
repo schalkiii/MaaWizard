@@ -25,6 +25,8 @@ export interface PipelineNodeViewData {
   errors: number;
   warnings: number;
   isEntry: boolean;
+  /** 若识别为 TemplateMatch，这里给出模板图片的可展示地址，便于预览匹配的是哪张图 */
+  templateSrc?: string;
 }
 
 export interface PipelineGraphNode {
@@ -210,6 +212,7 @@ export function buildNodes(
   document: PipelineDocument,
   savedPositions: Record<string, NodePosition> = {},
   issues: ValidationIssue[] = [],
+  templateMap: Record<string, string> = {},
 ): PipelineGraphNode[] {
   const layout = buildLayout(document);
   const counts = countIssues(issues);
@@ -229,6 +232,7 @@ export function buildNodes(
         errors: count?.errors ?? 0,
         warnings: count?.warnings ?? 0,
         isEntry: name === entry,
+        templateSrc: templateMap[name],
       },
     };
   });

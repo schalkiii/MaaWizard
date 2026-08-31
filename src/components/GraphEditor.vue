@@ -35,8 +35,10 @@ const props = withDefaults(
     issues?: ValidationIssue[];
     /** 用户手动摆放过的位置，优先于自动布局 */
     positions?: Record<string, NodePosition>;
+    /** 节点名 → 模板图片地址（TemplateMatch 节点用于预览匹配的是哪张图） */
+    templateImages?: Record<string, string>;
   }>(),
-  { issues: () => [], positions: () => ({}) },
+  { issues: () => [], positions: () => ({}), templateImages: () => ({}) },
 );
 
 const emit = defineEmits<{
@@ -51,7 +53,9 @@ const nodeTypes = {
   jumpback: JumpBackNodeView,
 };
 
-const nodes = computed(() => buildNodes(props.document, props.positions, props.issues));
+const nodes = computed(() =>
+  buildNodes(props.document, props.positions, props.issues, props.templateImages),
+);
 const edges = computed(() => buildEdges(props.document));
 
 const selectedEdgeId = ref<string | null>(null);

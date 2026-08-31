@@ -49,6 +49,11 @@ const accent = computed(() => recognitionColor(props.data.recognition));
       <span class="badge action">{{ data.action }}</span>
     </div>
 
+    <div v-if="data.templateSrc" class="template">
+      <img :src="data.templateSrc" alt="模板图" title="该节点匹配的模板图" />
+      <span class="cap">匹配模板</span>
+    </div>
+
     <Handle id="next" type="source" :position="Position.Right" class="handle next" />
     <Handle id="on_error" type="source" :position="Position.Bottom" class="handle error" />
   </div>
@@ -123,6 +128,24 @@ const accent = computed(() => recognitionColor(props.data.recognition));
 }
 .arrow {
   color: #9ca3af;
+}
+.template {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.template img {
+  width: 56px;
+  height: 56px;
+  object-fit: contain;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  background: #f8fafc;
+}
+.template .cap {
+  font-size: 10px;
+  color: #6b7280;
 }
 .handle {
   width: 10px;

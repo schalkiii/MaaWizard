@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import ControllerPanel from "./components/ControllerPanel.vue";
 import DevicePanel from "./components/DevicePanel.vue";
@@ -10,6 +10,7 @@ import RecorderPanel from "./components/RecorderPanel.vue";
 import RoiCapture from "./components/RoiCapture.vue";
 import {
   controllerScreenshot,
+  listResources,
   loadLibrary,
   loadResource,
   onMaaEvent,
@@ -23,6 +24,7 @@ import {
   runTask,
   runtimeStatus,
   stopTask,
+  templateImage,
   type PipelineDocument,
   type PipelineNodeData,
   type ValidationIssue,
@@ -43,6 +45,7 @@ const busy = ref(false);
 // 运行时
 const dllPath = ref("maa-sdk/bin/MaaFramework.dll");
 const resourceDir = ref("resource");
+const resourceOptions = ref<string[]>(["resource"]);
 const entry = ref("Demo");
 const controller = ref("none");
 
@@ -57,6 +60,8 @@ const screenImage = ref("");
 const document = ref<PipelineDocument>({});
 const selectedNode = ref<string | null>(null);
 const saveVersion = ref("V2");
+/** 节点名 → 模板图片地址（按资源目录解析后），供图编辑器预览 TemplateMatch 匹配的图 */
+const templateImages = ref<Record<string, string>>({});
 
 // 校验结果
 const issues = ref<ValidationIssue[]>([]);
@@ -100,6 +105,42 @@ async function run(label: string, action: () => Promise<string>) {
 
 async function refreshDocument() {
   document.value = await pipelineGet();
+  // 文档变化后刷新：入口节点下拉选项 + 模板图预览
+  syncEntryDefault();
+  await refreshTemplateImages();
+}
+
+/** 入口节点下拉：用当前文档里的全部节点名作为可选项 */
+const entryOptions = computed(() => Object.keys(document.value));
+
+/** 文档加载后，若当前入口名不在节点列表里，自动选中第一个节点 */
+function syncEntryDefault() {
+  const keys = Object.keys(document.value);
+  if (keys.length > 0 && !keys.includes(entry.value)) {
+    entry.value = keys[0];
+  }
+}
+
+/** 为所有 TemplateMatch 节点解析模板图片地址，供图编辑器预览 */
+async function refreshTemplateImages() {
+  const map: Record<string, string> = {};
+  for (const [name, node] of Object.entries(document.value)) {
+    const reco =
+      typeof node.recognition === "string"
+        ? { type: node.recognition, param: {} }
+        : (node.recognition ?? {});
+    const param = (reco as Record<string, unknown>).param as Record<string, unknown> | undefined;
+    if ((reco as Record<string, unknown>).type === "TemplateMatch" && param?.template) {
+      const tpl = String(param.template);
+      try {
+        const abs = await templateImage(resourceDir.value, tpl);
+        map[name] = convertFileSrc(abs);
+      } catch {
+        // 模板图缺失时留空，不阻断编辑
+      }
+    }
+  }
+  templateImages.value = map;
 }
 
 async function onOpenPipeline() {
@@ -225,6 +266,12 @@ const selectedNodeData = (): PipelineNodeData | null => {
 };
 
 onMounted(async () => {
+  // 加载可选资源包目录，供「加载资源」下拉框使用
+  try {
+    resourceOptions.value = await listResources();
+  } catch {
+    resourceOptions.value = ["resource"];
+  }
   // 订阅后端推送的节点执行事件，回显识别结果与命中截图
   unsubscribe = await onMaaEvent((payload) => {
     if (payload.node) {
@@ -284,6 +331,11 @@ function boxStyle(box: number[] | null): Record<string, string> {
 onUnmounted(() => {
   unsubscribe?.();
 });
+
+// 切换资源目录后，重新解析各节点的模板图预览
+watch(resourceDir, () => {
+  refreshTemplateImages();
+});
 </script>
 
 <template>
@@ -316,7 +368,9 @@ onUnmounted(() => {
       <p class="hint">首次运行需先执行 <code>make fetch-sdk</code> 下载官方运行时。</p>
 
       <div class="row">
-        <input v-model="resourceDir" placeholder="资源包目录" />
+        <select v-model="resourceDir" title="资源包目录">
+          <option v-for="opt in resourceOptions" :key="opt" :value="opt">{{ opt }}</option>
+        </select>
         <button :disabled="busy" @click="run('加载资源', () => loadResource(resourceDir))">
           加载资源
         </button>
@@ -327,7 +381,9 @@ onUnmounted(() => {
       <ControllerPanel @log="log" @controller="controller = $event" />
 
       <div class="row">
-        <input v-model="entry" placeholder="入口节点名" />
+        <select v-model="entry" title="入口节点名">
+          <option v-for="opt in entryOptions" :key="opt" :value="opt">{{ opt }}</option>
+        </select>
         <button :disabled="busy" @click="onRunTask">运行</button>
         <button :disabled="busy" @click="run('停止', () => stopTask())">停止</button>
         <button :disabled="busy" @click="onCaptureScreen">查看当前屏幕</button>
@@ -364,7 +420,9 @@ onUnmounted(() => {
     <section v-else-if="tab === 'editor'" class="card">
       <h2>图编辑器</h2>
       <div class="row">
-        <input v-model="resourceDir" placeholder="资源包目录" />
+        <select v-model="resourceDir" title="资源包目录">
+          <option v-for="opt in resourceOptions" :key="opt" :value="opt">{{ opt }}</option>
+        </select>
         <button :disabled="busy" @click="onOpenPipeline">打开</button>
         <select v-model="saveVersion">
           <option value="V1">导出 V1</option>
@@ -396,6 +454,7 @@ onUnmounted(() => {
         :document="document"
         :issues="issues"
         :positions="positions"
+        :template-images="templateImages"
         @select="selectedNode = $event"
         @connect="onConnect"
         @disconnect="onDisconnect"

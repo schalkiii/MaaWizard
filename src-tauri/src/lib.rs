@@ -59,6 +59,8 @@ pub fn run() {
             commands::capture_screenshot,
             // M4 设备管理
             commands::device_list_windows,
+            commands::list_resources,
+            commands::template_image,
             // M6 AI 增强
             commands::ai_detect,
             commands::ai_run,

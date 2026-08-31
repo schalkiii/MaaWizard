@@ -141,6 +141,13 @@ export const captureScreenshot = (output: string) =>
 /* M4 设备管理 */
 export const deviceListWindows = () => invoke<WindowInfo[]>("device_list_windows");
 
+/* 资源与模板 */
+export const listResources = () => invoke<string[]>("list_resources");
+
+/** 解析模板匹配用到的模板图片真实路径（绝对路径），便于前端展示匹配的是哪张图 */
+export const templateImage = (resourceDir: string, template: string) =>
+  invoke<string>("template_image", { resourceDir, template });
+
 /* M6 AI 增强 */
 export const aiDetect = () => invoke<AiEnvironment>("ai_detect");
 
