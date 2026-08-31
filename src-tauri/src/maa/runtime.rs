@@ -43,6 +43,40 @@ pub struct MaaRuntime {
     inner: Mutex<RuntimeInner>,
 }
 
+/// 把 DLL 所在目录加入 Windows 的 DLL 搜索路径。
+/// 非 Windows 平台为空实现（本项目只支持 Win32 控制器，接口保持一致即可）。
+#[cfg(windows)]
+fn prepare_dll_search_path(dll_path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+
+    let Some(directory) = dll_path.parent() else {
+        return;
+    };
+    if directory.as_os_str().is_empty() {
+        return;
+    }
+
+    let wide: Vec<u16> = directory
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SetDirectoryW 影响后续所有 LoadLibrary 调用，正是这里需要的
+    unsafe {
+        SetDllDirectoryW(wide.as_ptr());
+    }
+}
+
+#[cfg(not(windows))]
+fn prepare_dll_search_path(_dll_path: &Path) {}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn SetDllDirectoryW(path: *const u16) -> i32;
+}
+
 impl Default for MaaRuntime {
     fn default() -> Self {
         Self {
@@ -58,7 +92,25 @@ impl MaaRuntime {
 
         // dynamic 链接模式下必须显式加载；该 feature 属于依赖，不能用 cfg(feature) 判断
         let resolved = resolve_existing_path(dll_path);
-        maa_framework::load_library(&resolved).map_err(|e| e.to_string())?;
+        if !resolved.exists() {
+            return Err(format!(
+                "找不到动态库：{}（请确认 maa-sdk 已下载，或填写绝对路径）",
+                resolved.display()
+            ));
+        }
+
+        // MaaFramework.dll 依赖同目录的 MaaUtils / opencv / onnxruntime 等 DLL，
+        // 而 Windows 加载 DLL 时不会搜索被加载 DLL 自身的目录，必须先把它加进搜索路径，
+        // 否则会报 LoadLibraryExW failed。
+        prepare_dll_search_path(&resolved);
+
+        maa_framework::load_library(&resolved).map_err(|e| {
+            format!(
+                "加载 {} 失败：{}（该 DLL 依赖同目录的其他 DLL，请确认 maa-sdk/bin 完整且架构匹配）",
+                resolved.display(),
+                e
+            )
+        })?;
 
         // 用户数据放在可执行文件旁边，避免 dev 模式下污染源码目录
         let user_path = current_exe_dir().join("maa_userdata");

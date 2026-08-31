@@ -1,207 +1,232 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import { VueFlow, type Edge } from "@vue-flow/core";
+import {
+  VueFlow,
+  type Connection,
+  type Edge,
+  type GraphNode,
+  type VueFlowStore,
+} from "@vue-flow/core";
+import { Background } from "@vue-flow/background";
+import { Controls } from "@vue-flow/controls";
+import { MiniMap } from "@vue-flow/minimap";
 import "@vue-flow/core/dist/style.css";
 import "@vue-flow/core/dist/theme-default.css";
-import type { PipelineDocument } from "../api/maa";
+import "@vue-flow/controls/dist/style.css";
+import "@vue-flow/minimap/dist/style.css";
+import { computed, ref } from "vue";
 
-const props = defineProps<{ document: PipelineDocument }>();
-const emit = defineEmits<{ (event: "select", name: string): void }>();
+import type { PipelineDocument, ValidationIssue } from "../api/maa";
+import JumpBackNodeView from "./JumpBackNodeView.vue";
+import PipelineNodeView from "./PipelineNodeView.vue";
+import {
+  buildEdges,
+  buildNodes,
+  JUMPBACK_ID,
+  recognitionColor,
+  type EdgeKind,
+  type NodePosition,
+  type PipelineNodeViewData,
+} from "./graph";
 
-/** 取出 next/on_error 条目指向的节点名（对象形式取 name 字段） */
-function entryTarget(entry: unknown): string | null {
-  if (typeof entry === "string") {
-    return entry;
-  }
-  if (entry && typeof entry === "object" && "name" in entry) {
-    return String((entry as Record<string, unknown>).name);
-  }
-  return null;
-}
+const props = withDefaults(
+  defineProps<{
+    document: PipelineDocument;
+    /** 校验问题，用于在节点上打角标 */
+    issues?: ValidationIssue[];
+    /** 用户手动摆放过的位置，优先于自动布局 */
+    positions?: Record<string, NodePosition>;
+  }>(),
+  { issues: () => [], positions: () => ({}) },
+);
 
-/**
- * 依据 next 链做简单分层布局：入度为 0 的节点作为根，
- * 按 BFS 深度分列、同层内顺序分行。
- */
-function buildLayout(document: PipelineDocument) {
-  const names = Object.keys(document);
-  const indegree = new Map<string, number>(names.map((name) => [name, 0]));
-  const adjacency = new Map<string, string[]>(names.map((name) => [name, []]));
+const emit = defineEmits<{
+  (event: "select", name: string): void;
+  (event: "connect", payload: { source: string; target: string; kind: EdgeKind }): void;
+  (event: "disconnect", payload: { source: string; target: string; kind: EdgeKind }): void;
+  (event: "move", payload: { name: string; position: NodePosition }): void;
+}>();
 
-  for (const name of names) {
-    const node = document[name];
-    const entries = [...(node.next ?? []), ...(node.on_error ?? [])];
-    for (const entry of entries) {
-      const target = entryTarget(entry);
-      if (target && indegree.has(target)) {
-        indegree.set(target, (indegree.get(target) ?? 0) + 1);
-        adjacency.get(name)?.push(target);
-      }
-    }
-  }
+const nodeTypes = {
+  pipeline: PipelineNodeView,
+  jumpback: JumpBackNodeView,
+};
 
-  const roots = names.filter((name) => (indegree.get(name) ?? 0) === 0);
-  const start = roots.length > 0 ? roots : names.slice(0, 1);
+const nodes = computed(() => buildNodes(props.document, props.positions, props.issues));
+const edges = computed(() => buildEdges(props.document));
 
-  const depth = new Map<string, number>();
-  const visited = new Set<string>();
-  const queue: Array<[string, number]> = start.map((name) => [name, 0]);
+const selectedEdgeId = ref<string | null>(null);
+let flow: VueFlowStore | null = null;
 
-  while (queue.length > 0) {
-    const [name, level] = queue.shift()!;
-    if (visited.has(name)) {
-      continue;
-    }
-    visited.add(name);
-    depth.set(name, Math.min(level, depth.get(name) ?? Number.POSITIVE_INFINITY));
-    for (const next of adjacency.get(name) ?? []) {
-      if (!visited.has(next)) {
-        queue.push([next, level + 1]);
-      }
-    }
-  }
-
-  // 环内等无法从根到达的节点，统一放到最后
-  let maxDepth = depth.size > 0 ? Math.max(...depth.values()) : 0;
-  for (const name of names) {
-    if (!depth.has(name)) {
-      maxDepth += 1;
-      depth.set(name, maxDepth);
-    }
-  }
-
-  const byDepth = new Map<number, string[]>();
-  for (const name of names) {
-    const level = depth.get(name) ?? 0;
-    const group = byDepth.get(level) ?? [];
-    group.push(name);
-    byDepth.set(level, group);
-  }
-
-  const positions = new Map<string, { x: number; y: number }>();
-  for (const [level, group] of byDepth) {
-    group.forEach((name, index) => {
-      positions.set(name, { x: level * 280, y: index * 110 });
-    });
-  }
-  return positions;
-}
-
-const nodes = computed(() => {
-  const document = props.document;
-  const positions = buildLayout(document);
-  const result = Object.keys(document).map((name) => {
-    const node = document[name];
-    const recognition = describeSpec(node.recognition);
-    const action = describeSpec(node.action);
-    return {
-      id: name,
-      position: positions.get(name) ?? { x: 0, y: 0 },
-      data: { label: `${name}\n${recognition} → ${action}` },
-      // 记录原始节点，供父组件在选中时直接读取
-      raw: node,
-    };
-  });
-
-  // [JumpBack] 是 next 列表中的特殊标记，用合成节点可视化出来
-  const hasJumpBack = Object.values(document).some((node) =>
-    [...(node.next ?? []), ...(node.on_error ?? [])].some(
-      (entry) => entryTarget(entry) === "[JumpBack]",
-    ),
-  );
-  if (hasJumpBack) {
-    result.push({
-      id: "__jumpback__",
-      position: { x: 0, y: -140 },
-      data: { label: "[JumpBack]\n回跳点" },
-      raw: {},
-    });
-  }
-  return result;
-});
-
-const edges = computed(() => {
-  const document = props.document;
-  const result: Edge[] = [];
-
-  for (const name of Object.keys(document)) {
-    const node = document[name];
-    for (const entry of node.next ?? []) {
-      const target = entryTarget(entry);
-      if (!target) continue;
-      result.push({
-        id: `${name}->${target}`,
-        source: name,
-        target: target === "[JumpBack]" ? "__jumpback__" : target,
-        animated: true,
-        style: { stroke: "#2563eb" },
-        label: "next",
-      });
-    }
-    for (const entry of node.on_error ?? []) {
-      const target = entryTarget(entry);
-      if (!target) continue;
-      result.push({
-        id: `${name}-err->${target}`,
-        source: name,
-        target: target === "[JumpBack]" ? "__jumpback__" : target,
-        style: { stroke: "#dc2626", strokeDasharray: "5 5" },
-        label: "on_error",
-      });
-    }
-  }
-  return result;
-});
-
-/** 兼容 V1（字符串）与 V2（{type,param}）两种写法 */
-function describeSpec(spec: unknown): string {
-  if (typeof spec === "string") {
-    return spec;
-  }
-  if (spec && typeof spec === "object" && "type" in spec) {
-    return String((spec as Record<string, unknown>).type);
-  }
-  return "-";
+function onPaneReady(instance: VueFlowStore) {
+  flow = instance;
 }
 
 function onNodeClick(event: { node: { id: string } }) {
-  if (event.node.id !== "__jumpback__") {
+  selectedEdgeId.value = null;
+  // [JumpBack] 是合成标记节点，不可选中编辑
+  if (event.node.id !== JUMPBACK_ID) {
     emit("select", event.node.id);
   }
 }
+
+/** 从右侧出口拖出的是 next，从下方出口拖出的是 on_error */
+function onConnect(connection: Connection) {
+  if (!connection.source || !connection.target) {
+    return;
+  }
+  emit("connect", {
+    source: connection.source,
+    target: connection.target,
+    kind: connection.sourceHandle === "on_error" ? "on_error" : "next",
+  });
+}
+
+function onEdgeClick(event: { edge: Edge }) {
+  selectedEdgeId.value = event.edge.id;
+}
+
+function removeSelectedEdge() {
+  const target = edges.value.find((edge) => edge.id === selectedEdgeId.value);
+  if (!target) {
+    return;
+  }
+  emit("disconnect", {
+    source: target.source,
+    target: target.target,
+    kind: target.kind,
+  });
+  selectedEdgeId.value = null;
+}
+
+function onNodeDragStop(event: { node: { id: string; position: NodePosition } }) {
+  if (event.node.id === JUMPBACK_ID) {
+    return;
+  }
+  emit("move", { name: event.node.id, position: event.node.position });
+}
+
+function fitView() {
+  flow?.fitView({ padding: 0.2 });
+}
+
+function minimapColor(node: GraphNode) {
+  return recognitionColor((node.data as PipelineNodeViewData).recognition);
+}
+
+defineExpose({ fitView });
 </script>
 
 <template>
   <div class="editor">
-    <VueFlow
-      :nodes="nodes"
-      :edges="edges"
-      :fit-view-on-init="true"
-      @node-click="onNodeClick"
-    />
+    <div class="toolbar">
+      <span class="stat">{{ nodes.length }} 节点 · {{ edges.length }} 连线</span>
+      <span class="legend">
+        <i class="line next" />next
+        <i class="line error" />on_error
+      </span>
+      <span class="spacer" />
+      <button type="button" class="tool" :disabled="!selectedEdgeId" @click="removeSelectedEdge">
+        删除选中连线
+      </button>
+      <button type="button" class="tool" @click="fitView">适应视图</button>
+    </div>
+
+    <div class="canvas">
+      <VueFlow
+        :nodes="nodes"
+        :edges="edges"
+        :node-types="nodeTypes"
+        :fit-view-on-init="true"
+        :min-zoom="0.2"
+        :max-zoom="2"
+        @pane-ready="onPaneReady"
+        @connect="onConnect"
+        @edge-click="onEdgeClick"
+        @node-click="onNodeClick"
+        @node-drag-stop="onNodeDragStop"
+      >
+        <Background :gap="18" pattern-color="#d1d5db" />
+        <Controls />
+        <MiniMap :node-color="minimapColor" pannable zoomable />
+      </VueFlow>
+    </div>
+
     <p v-if="Object.keys(document).length === 0" class="empty">
       尚未加载节点。可打开资源包、录制操作，或点击「新建节点」。
+    </p>
+    <p v-else class="tip">
+      拖拽节点<strong>右侧</strong>圆点连 next、<strong>下方</strong>圆点连 on_error；点击连线可选中并删除。
     </p>
   </div>
 </template>
 
 <style scoped>
 .editor {
-  height: 420px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  position: relative;
-  background: #fafafa;
+  margin-top: 10px;
 }
-.empty {
-  position: absolute;
-  inset: 0;
+.toolbar {
   display: flex;
   align-items: center;
-  justify-content: center;
-  margin: 0;
-  color: #9ca3af;
-  pointer-events: none;
-  font-size: 13px;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #4b5563;
+}
+.spacer {
+  flex: 1;
+}
+.stat {
+  font-weight: 600;
+}
+.legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #6b7280;
+}
+.line {
+  display: inline-block;
+  width: 18px;
+  height: 0;
+  border-top: 2px solid #2563eb;
+}
+.line.error {
+  border-top: 2px dashed #dc2626;
+}
+.tool {
+  padding: 4px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  color: #374151;
+  font-size: 12px;
+  cursor: pointer;
+}
+.tool:hover:not(:disabled) {
+  border-color: #2563eb;
+  color: #2563eb;
+}
+.tool:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.canvas {
+  height: 460px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fafafa;
+}
+.empty,
+.tip {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #6b7280;
+}
+.empty {
+  padding: 24px;
+  border: 1px dashed #d1d5db;
+  border-radius: 8px;
+  text-align: center;
 }
 </style>

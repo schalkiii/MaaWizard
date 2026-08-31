@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import AiPanel from "./components/AiPanel.vue";
 import DevicePanel from "./components/DevicePanel.vue";
 import GraphEditor from "./components/GraphEditor.vue";
+import type { EdgeKind, NodePosition } from "./components/graph";
 import NodeInspector from "./components/NodeInspector.vue";
 import RecorderPanel from "./components/RecorderPanel.vue";
 import RoiCapture from "./components/RoiCapture.vue";
@@ -55,6 +56,19 @@ const validated = ref(false);
 const errorCount = computed(
   () => issues.value.filter((issue) => issue.level === "error").length,
 );
+
+/** 用户在画布上手动摆放的节点位置，持久化到 localStorage，避免刷新后重排 */
+const POSITION_KEY = "maawizard.positions";
+
+function loadPositions(): Record<string, NodePosition> {
+  try {
+    return JSON.parse(localStorage.getItem(POSITION_KEY) ?? "{}") as Record<string, NodePosition>;
+  } catch {
+    return {};
+  }
+}
+
+const positions = ref<Record<string, NodePosition>>(loadPositions());
 
 const logs = ref<string[]>([]);
 let unsubscribe: (() => void) | null = null;
@@ -119,6 +133,56 @@ async function onValidate() {
     log(`校验失败：${String(error)}`);
   } finally {
     busy.value = false;
+  }
+}
+
+/** 取出连线列表中的节点名（兼容字符串与 {name} 对象两种写法） */
+function entryName(item: unknown): unknown {
+  if (typeof item === "string") {
+    return item;
+  }
+  if (item && typeof item === "object") {
+    return (item as Record<string, unknown>).name;
+  }
+  return null;
+}
+
+/** 画布上拖拽连线：把目标节点写进源节点的 next 或 on_error */
+async function onConnect(payload: { source: string; target: string; kind: EdgeKind }) {
+  const node = document.value[payload.source];
+  if (!node) {
+    return;
+  }
+  const list = ((node[payload.kind] as unknown[]) ?? []).map(String);
+  if (list.includes(payload.target)) {
+    log(`连线已存在：${payload.source} -> ${payload.target}`);
+    return;
+  }
+  const updated: PipelineNodeData = { ...node, [payload.kind]: [...list, payload.target] };
+  await run("新增连线", () => pipelineUpdateNode(payload.source, updated));
+  await refreshDocument();
+}
+
+/** 删除画布连线：从源节点的 next / on_error 中移除目标 */
+async function onDisconnect(payload: { source: string; target: string; kind: EdgeKind }) {
+  const node = document.value[payload.source];
+  if (!node) {
+    return;
+  }
+  const list = ((node[payload.kind] as unknown[]) ?? []).filter(
+    (item) => entryName(item) !== payload.target,
+  );
+  const updated: PipelineNodeData = { ...node, [payload.kind]: list };
+  await run("删除连线", () => pipelineUpdateNode(payload.source, updated));
+  await refreshDocument();
+}
+
+function onNodeMove(payload: { name: string; position: NodePosition }) {
+  positions.value = { ...positions.value, [payload.name]: payload.position };
+  try {
+    localStorage.setItem(POSITION_KEY, JSON.stringify(positions.value));
+  } catch {
+    // 存储不可用时忽略：位置只影响画布排布，不影响 pipeline 内容
   }
 }
 
@@ -241,7 +305,15 @@ onUnmounted(() => {
       </div>
       <p v-else-if="validated" class="hint">校验通过，没有发现问题。</p>
 
-      <GraphEditor :document="document" @select="selectedNode = $event" />
+      <GraphEditor
+        :document="document"
+        :issues="issues"
+        :positions="positions"
+        @select="selectedNode = $event"
+        @connect="onConnect"
+        @disconnect="onDisconnect"
+        @move="onNodeMove"
+      />
 
       <RoiCapture :resource-dir="resourceDir" @log="log" @apply="onApplyTemplate" />
 
@@ -303,6 +375,8 @@ onUnmounted(() => {
   padding: 7px 16px;
   border: 1px solid #d1d5db;
   background: #fff;
+  /* 必须显式指定文字色：下面全局 button 规则的 color:#fff 会命中这里，导致白底白字 */
+  color: #374151;
   border-radius: 999px;
   cursor: pointer;
   font-size: 13px;
