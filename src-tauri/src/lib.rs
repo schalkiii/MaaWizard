@@ -29,6 +29,7 @@ pub fn run() {
             commands::pipeline_update_node,
             commands::pipeline_add_node,
             commands::pipeline_delete_node,
+            commands::pipeline_validate,
             // M2/M3 录制与模板抓取
             commands::recorder_start,
             commands::recorder_stop,

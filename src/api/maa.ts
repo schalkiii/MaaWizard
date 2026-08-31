@@ -50,6 +50,16 @@ export interface PipelineNodeData {
 /** Pipeline 文档：节点名 → 节点 */
 export type PipelineDocument = Record<string, PipelineNodeData>;
 
+/** 校验问题（对应后端 pipeline/validate.rs 的 ValidationIssue） */
+export interface ValidationIssue {
+  /** 节点名；文档级别问题为空字符串 */
+  node: string;
+  level: "error" | "warning";
+  /** 字段路径，如 recognition.template */
+  field: string;
+  message: string;
+}
+
 /**
  * 封装所有 Tauri 命令。
  * 前端不持有 Maa 对象，全部通过命令读写后端状态（见 ADR 0002）。
@@ -93,6 +103,9 @@ export const pipelineAddNode = (name?: string) =>
 
 export const pipelineDeleteNode = (name: string) =>
   invoke<string>("pipeline_delete_node", { name });
+
+/** 校验当前文档，返回可定位到「节点 + 字段」的问题列表 */
+export const pipelineValidate = () => invoke<ValidationIssue[]>("pipeline_validate");
 
 /* M2/M3 录制与模板抓取 */
 export const recorderStart = (mode: string, resourceDir: string) =>

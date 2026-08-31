@@ -1,7 +1,7 @@
 # MaaWizard 统一命令入口
 # 约定：所有构建/清理动作统一通过 make 目标触发，不在命令行中直接执行 rm
 
-.PHONY: help deps dev build check lint lint-rust lint-ts lint-md test test-rust clean distclean fetch-sdk
+.PHONY: help deps dev build check lint lint-rust lint-ts lint-md test test-rust test-web clean distclean fetch-sdk
 
 help:
 	@echo "可用目标："
@@ -33,10 +33,13 @@ lint-ts:
 lint-rust:
 	cd src-tauri && cargo clippy
 
-test: test-rust
+test: test-rust test-web
 
 test-rust:
 	cd src-tauri && cargo test
+
+test-web:
+	npx vitest run
 
 deps:
 	npm install

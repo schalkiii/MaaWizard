@@ -14,7 +14,8 @@
     "lint:rust": "cd src-tauri && cargo clippy",
     "lint": "npm run lint:md && npm run lint:ts && npm run lint:rust",
     "test:rust": "cd src-tauri && cargo test",
-    "test": "npm run test:rust"
+    "test:web": "vitest run",
+    "test": "npm run test:rust && npm run test:web"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -23,9 +24,12 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2",
     "@vitejs/plugin-vue": "^5",
+    "@vue/test-utils": "^2.5.0",
+    "jsdom": "^30.0.1",
     "markdownlint-cli2": "^0.23.0",
     "typescript": "^5",
     "vite": "^6",
+    "vitest": "^4.1.11",
     "vue": "^3",
     "vue-tsc": "^2"
   }

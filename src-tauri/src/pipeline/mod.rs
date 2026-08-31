@@ -1,6 +1,10 @@
 pub mod model;
+pub mod validate;
 
 pub use model::*;
+pub use validate::ValidationIssue;
+
+use validate::{has_errors, IssueLevel};
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -85,12 +89,29 @@ impl PipelineState {
             .map_err(|e| e.to_string())?;
         std::fs::write(&file_path, json).map_err(|e| e.to_string())?;
 
-        Ok(format!(
+        // 顺带给一次校验提示，避免把错误一直留到运行时才暴露
+        let mut message = format!(
             "已保存 {} 个节点到 {}（协议 {:?}）",
             document.nodes.len(),
             file_path.display(),
             version
-        ))
+        );
+        let issues = validate::validate(&document);
+        if has_errors(&issues) {
+            let error_count = issues
+                .iter()
+                .filter(|item| item.level == IssueLevel::Error)
+                .count();
+            message.push_str(&format!("；注意：存在 {} 处校验错误，建议先「校验」修复", error_count));
+        }
+
+        Ok(message)
+    }
+
+    /// 校验当前文档，返回可定位到字段的问题列表
+    pub fn validate(&self) -> Result<Vec<ValidationIssue>, String> {
+        let document = self.document.lock().map_err(lock_error)?;
+        Ok(crate::pipeline::validate::validate(&document))
     }
 
     pub fn snapshot(&self) -> Result<Value, String> {

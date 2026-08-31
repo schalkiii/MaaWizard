@@ -5,7 +5,7 @@ use crate::ai;
 use crate::capture;
 use crate::device;
 use crate::maa::{resolve_existing_path_allow_missing, AdbDeviceInfo, MaaRuntime};
-use crate::pipeline::{NextEntry, PipelineState, PipelineVersion};
+use crate::pipeline::{NextEntry, PipelineState, PipelineVersion, ValidationIssue};
 use crate::recorder::{RecordMode, RecorderState, RecordedStep};
 
 /* ---------------- M0 运行时 ---------------- */
@@ -121,6 +121,14 @@ pub fn pipeline_delete_node(
     name: String,
 ) -> Result<String, String> {
     pipeline.delete_node(&name)
+}
+
+/// 校验当前文档；返回可定位到「节点 + 字段」的问题列表，供前端在保存/运行前提示
+#[tauri::command]
+pub fn pipeline_validate(
+    pipeline: State<'_, PipelineState>,
+) -> Result<Vec<ValidationIssue>, String> {
+    pipeline.validate()
 }
 
 /* ---------------- M2/M3 录制与模板抓取 ---------------- */

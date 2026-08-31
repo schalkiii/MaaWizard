@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import AiPanel from "./components/AiPanel.vue";
 import DevicePanel from "./components/DevicePanel.vue";
 import GraphEditor from "./components/GraphEditor.vue";
@@ -16,11 +16,13 @@ import {
   pipelineOpen,
   pipelineSave,
   pipelineUpdateNode,
+  pipelineValidate,
   runTask,
   runtimeStatus,
   stopTask,
   type PipelineDocument,
   type PipelineNodeData,
+  type ValidationIssue,
 } from "./api/maa";
 
 type TabKey = "run" | "editor" | "record" | "device" | "ai";
@@ -46,6 +48,13 @@ const controller = ref("none");
 const document = ref<PipelineDocument>({});
 const selectedNode = ref<string | null>(null);
 const saveVersion = ref("V2");
+
+// 校验结果
+const issues = ref<ValidationIssue[]>([]);
+const validated = ref(false);
+const errorCount = computed(
+  () => issues.value.filter((issue) => issue.level === "error").length,
+);
 
 const logs = ref<string[]>([]);
 let unsubscribe: (() => void) | null = null;
@@ -96,6 +105,21 @@ async function onDeleteNode() {
   await run("删除节点", () => pipelineDeleteNode(name));
   selectedNode.value = null;
   await refreshDocument();
+}
+
+/** 校验当前文档，把问题定位到节点与字段 */
+async function onValidate() {
+  busy.value = true;
+  try {
+    issues.value = await pipelineValidate();
+    validated.value = true;
+    const warnings = issues.value.length - errorCount.value;
+    log(`校验完成：${errorCount.value} 个错误、${warnings} 个提示`);
+  } catch (error) {
+    log(`校验失败：${String(error)}`);
+  } finally {
+    busy.value = false;
+  }
 }
 
 async function onSaveNode(payload: { name: string; node: PipelineNodeData }) {
@@ -198,7 +222,24 @@ onUnmounted(() => {
         <button :disabled="busy" @click="onSavePipeline">保存</button>
         <button :disabled="busy" @click="onAddNode">新建节点</button>
         <button :disabled="busy || !selectedNode" @click="onDeleteNode">删除节点</button>
+        <button :disabled="busy" @click="onValidate">校验</button>
       </div>
+
+      <!-- 校验结果：点击问题可跳到对应节点 -->
+      <div v-if="issues.length > 0" class="issues">
+        <h3>校验结果：{{ errorCount }} 个错误、{{ issues.length - errorCount }} 个提示</h3>
+        <p
+          v-for="(issue, index) in issues"
+          :key="index"
+          :class="['issue', issue.level]"
+          @click="issue.node && (selectedNode = issue.node)"
+        >
+          <b>{{ issue.node || "文档" }}</b>
+          <code v-if="issue.field">{{ issue.field }}</code>
+          {{ issue.message }}
+        </p>
+      </div>
+      <p v-else-if="validated" class="hint">校验通过，没有发现问题。</p>
 
       <GraphEditor :document="document" @select="selectedNode = $event" />
 
@@ -319,6 +360,41 @@ button:disabled {
 }
 .inspector-wrap {
   margin-top: 14px;
+}
+.issues {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+}
+.issues h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.issue {
+  margin: 0 0 4px;
+  padding: 5px 8px;
+  border-left: 3px solid #d1d5db;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.issue code {
+  margin: 0 6px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: #f3f4f6;
+}
+.issue.error {
+  border-left-color: #dc2626;
+  background: #fef2f2;
+  color: #991b1b;
+}
+.issue.warning {
+  border-left-color: #f59e0b;
+  background: #fffbeb;
+  color: #92400e;
 }
 .logs {
   max-height: 260px;
