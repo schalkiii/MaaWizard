@@ -25,6 +25,8 @@
 - **质量门禁（固化到 npm scripts / Makefile）**：`make lint` = markdownlint-cli2（`maa-sdk/` 忽略）+ vue-tsc --noEmit + cargo clippy，三者全绿；`make test` = `cargo test`（38）+ `vitest run`（34），合计 72 个测试全绿。
 - **前端测试**：vitest 4 + @vue/test-utils 2.5 + jsdom 30；配置 `vitest.config.ts`（jsdom、用例匹配 `src/**/*.spec.ts`），`src/test/setup.ts` 补 ResizeObserver。Vue Flow 相关组件用替身把 nodes/edges 渲染成文本断言，规避 jsdom 无布局能力。
 - **Pipeline 校验**：`src-tauri/src/pipeline/validate.rs` 校验未知类型 / 必填参数 / 悬空跳转 / 纯坐标脆弱性，命令 `pipeline_validate`，前端「校验」面板可点击定位到节点；`save()` 顺带提示错误数。
+- **构建产物**：`src-tauri\target\release\maa-wizard.exe`（免安装）、`bundle\nsis\MaaWizard_0.1.0_x64-setup.exe`（安装包）；`npm run tauri build` 约 2 分钟。**exe 正在运行时构建会因「拒绝访问 (os error 5)」失败，需先关闭应用**。
+- **路径解析**：`resolve_existing_path` / `resolve_existing_path_allow_missing` 沿 cwd 与 exe 目录逐级向上查找（最多 8 层），因此从 `target/release` 直接运行 exe 也能定位到仓库根的 `maa-sdk` 与 `resource`；`maa_userdata` 写在可执行文件旁。真机验收步骤见 `docs/验收清单.md`。
 - **MaaFramework SDK**：`maa-sdk/`（MAA-win-x86_64-v5.12.3），经 `make fetch-sdk` 下载。dynamic 链接下编译期不需要 SDK，运行期 `load_library` 才需要。
 - **命令入口**：Makefile（make deps/check/dev/build/fetch-sdk/clean/distclean），清理动作封装在 make clean，不直接执行 rm。
 
