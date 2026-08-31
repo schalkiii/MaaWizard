@@ -38,3 +38,4 @@
 - **PowerShell 5.1 编码**：无 BOM 的 UTF-8 .ps1（含中文）会被按 ANSI 解析成乱码并破坏语法。脚本需写为 UTF-8 **带 BOM**（EF BB BF）。
 - **npm 新策略**：esbuild 的 postinstall 被拦截会导致 Vite 失败，需 `npm rebuild esbuild`。
 - **dev 期路径**：`tauri dev` 时 Rust 侧 cwd 是 `src-tauri`，而 SDK/资源在仓库根目录；`resolve_existing_path()` 依次尝试 原样→cwd→上级目录→exe 目录。
+- **MaaFramework 截图存盘**：`controller.cached_image()` 返回的 `MaaImageBuffer::to_vec()`（GetEncoded）**常为空**，直接 `to_vec()` 存盘会得不到图。正确做法：优先 to_vec 编码 PNG，编码为空时回退 `raw_data()`（BGR(A) 行主序）构造 RGBA 再用 `image` crate 存盘。已封装为 `capture::save_maa_image`，控制器截图与运行态识别帧均走它。

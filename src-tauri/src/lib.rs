@@ -1,5 +1,6 @@
 mod ai;
 mod capture;
+use tauri::Manager;
 mod commands;
 mod device;
 mod maa;
@@ -12,6 +13,24 @@ pub fn run() {
         .manage(maa::MaaRuntime::default())
         .manage(pipeline::PipelineState::default())
         .manage(recorder::RecorderState::default())
+        .setup(|app| {
+            // 启动时尝试自动加载 MaaFramework 动态库，避免用户点「刷新窗口」等操作时
+            // 因库未加载导致 FFI 空指针段错误（进程直接闪退）。加载失败仅告警，不阻断启动。
+            let runtime = app.state::<maa::MaaRuntime>();
+            let dll = maa::resolve_existing_path("maa-sdk/bin/MaaFramework.dll");
+            if dll.exists() {
+                match runtime.load_library(dll.to_str().unwrap_or("")) {
+                    Ok(msg) => eprintln!("[maa] {msg}"),
+                    Err(e) => eprintln!("[maa] 自动加载 MaaFramework 失败：{e}"),
+                }
+            } else {
+                eprintln!(
+                    "[maa] 未找到 {}，请在界面手动『加载动态库』（make fetch-sdk 下载）",
+                    dll.display()
+                );
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // M0 运行时
             commands::maa_load_library,

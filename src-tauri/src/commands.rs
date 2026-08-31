@@ -285,7 +285,8 @@ pub fn capture_screenshot(output: String) -> Result<String, String> {
 /* ---------------- M4 设备管理 ---------------- */
 
 #[tauri::command]
-pub fn device_list_windows() -> Result<Vec<device::WindowInfo>, String> {
+pub fn device_list_windows(runtime: State<'_, MaaRuntime>) -> Result<Vec<device::WindowInfo>, String> {
+    runtime.ensure_loaded()?;
     device::list_windows()
 }
 

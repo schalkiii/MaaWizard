@@ -90,6 +90,11 @@ impl MaaRuntime {
     pub fn load_library(&self, dll_path: &str) -> Result<String, String> {
         let mut inner = self.lock()?;
 
+        // 幂等：已经加载过就直接返回，避免重复 load 报错
+        if inner.library_loaded {
+            return Ok("MaaFramework 已加载".to_string());
+        }
+
         // dynamic 链接模式下必须显式加载；该 feature 属于依赖，不能用 cfg(feature) 判断
         let resolved = resolve_existing_path(dll_path);
         if !resolved.exists() {
@@ -284,7 +289,7 @@ impl MaaRuntime {
         Ok(format!("{} 已连接", label))
     }
 
-    fn ensure_loaded(&self) -> Result<(), String> {
+    pub(crate) fn ensure_loaded(&self) -> Result<(), String> {
         let inner = self.lock()?;
         if !inner.library_loaded {
             return Err("尚未加载 MaaFramework 动态库，请先点击「加载动态库」".to_string());
