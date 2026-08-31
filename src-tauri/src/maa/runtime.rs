@@ -217,12 +217,8 @@ impl MaaRuntime {
         let job = controller.post_screencap().map_err(|e| e.to_string())?;
         let _ = controller.wait(job);
         let image = controller.cached_image().map_err(|e| e.to_string())?;
-        let bytes = image.to_vec().ok_or("无法编码控制器截图")?;
         let path = resolve_existing_path_allow_missing(output);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        crate::capture::save_maa_image(&image, &path)?;
         Ok(path.to_string_lossy().to_string())
     }
 

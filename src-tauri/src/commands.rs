@@ -90,13 +90,11 @@ pub async fn maa_run_task(
                 if let Ok(job) = controller.post_screencap() {
                     let _ = controller.wait(job);
                     if let Ok(image) = controller.cached_image() {
-                        if let Some(bytes) = image.to_vec() {
-                            let path = snapshot_dir
-                                .join(format!(".recognize_{}.png", chrono::Utc::now().timestamp_millis()));
-                            let _ = std::fs::create_dir_all(&snapshot_dir);
-                            if std::fs::write(&path, bytes).is_ok() {
-                                image_path = path.to_string_lossy().to_string();
-                            }
+                        let path = snapshot_dir
+                            .join(format!(".recognize_{}.png", chrono::Utc::now().timestamp_millis()));
+                        let _ = std::fs::create_dir_all(&snapshot_dir);
+                        if crate::capture::save_maa_image(&image, &path).is_ok() {
+                            image_path = path.to_string_lossy().to_string();
                         }
                     }
                 }
