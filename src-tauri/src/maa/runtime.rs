@@ -362,6 +362,18 @@ mod tests {
         assert!(resolve_in_bases("nope/file.txt", &bases, true).is_none());
     }
 
+    /// 回归测试：从构建产物所在的多层嵌套目录出发，也能定位到仓库根的 SDK 与资源。
+    /// 依赖 `make fetch-sdk` 已执行，缺失时跳过而非误报失败。
+    #[test]
+    fn sdk_and_resource_are_reachable_from_nested_directory() {
+        if !resolve_existing_path("maa-sdk/bin/MaaFramework.dll").exists() {
+            eprintln!("跳过：未找到 maa-sdk，请先执行 make fetch-sdk");
+            return;
+        }
+        assert!(resolve_existing_path("maa-sdk/bin/MaaFramework.dll").is_file());
+        assert!(resolve_existing_path("resource").is_dir());
+    }
+
     #[test]
     fn absolute_paths_are_kept_as_is() {
         let absolute = if cfg!(windows) { "C:/definitely/not/here.txt" } else { "/definitely/not/here.txt" };
