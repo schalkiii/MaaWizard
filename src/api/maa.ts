@@ -80,11 +80,16 @@ export const connectWin32 = (hwnd: number) =>
 export const loadResource = (path: string) =>
   invoke<string>("maa_load_resource", { path });
 
-export const runTask = (entry: string) => invoke<string>("maa_run_task", { entry });
+export const runTask = (entry: string, resourceDir: string) =>
+  invoke<string>("maa_run_task", { entry, resourceDir });
 
 export const stopTask = () => invoke<string>("maa_stop");
 
 export const runtimeStatus = () => invoke<string>("maa_status");
+
+/** 截一帧控制器画面并保存到文件，返回路径（用于展示「当前屏幕」） */
+export const controllerScreenshot = (output: string) =>
+  invoke<string>("maa_controller_screenshot", { output });
 
 /* M1 图编辑器 */
 export const pipelineOpen = (path: string) =>
@@ -144,12 +149,28 @@ export const aiRun = (program: string, args: string[]) =>
 
 /**
  * 订阅后端推送的运行事件（阶段 4 调试回显）。
+ * 当识别命中时，payload 额外携带 node（节点名）、hit（是否命中）、
+ * box（[x, y, w, h] 识别框）、image（命中风存盘路径），便于前端叠加展示「匹配到了什么」。
  * 返回取消订阅函数，组件卸载时调用。
  */
 export function onMaaEvent(
-  handler: (payload: { message: string; detail: string }) => void,
+  handler: (payload: {
+    message: string;
+    detail: string;
+    node: string;
+    hit: boolean;
+    box: number[] | null;
+    image: string;
+  }) => void,
 ) {
-  return listen<{ message: string; detail: string }>("maa://event", (event) => {
+  return listen<{
+    message: string;
+    detail: string;
+    node: string;
+    hit: boolean;
+    box: number[] | null;
+    image: string;
+  }>("maa://event", (event) => {
     handler(event.payload);
   });
 }

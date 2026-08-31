@@ -10,6 +10,7 @@ const emit = defineEmits<{
 }>();
 
 const imageSrc = ref("");
+const templateSrc = ref("");
 const busy = ref(false);
 const dragging = ref(false);
 const start = ref({ x: 0, y: 0 });
@@ -81,6 +82,8 @@ async function onGrab() {
     );
     emit("log", `已抓取模板 ${result.file}，roi=[${result.roi.join(", ")}]`);
     emit("apply", result.file);
+    // 直接展示抓取到的模板图，让用户看清「这次框选的 template 是什么」
+    templateSrc.value = convertFileSrc(`${props.resourceDir}/image/${result.file}`);
   } catch (error) {
     emit("log", `抓取模板失败：${String(error)}`);
   } finally {
@@ -121,6 +124,11 @@ async function onGrab() {
       />
     </div>
     <p v-else class="hint">点击「截取屏幕」后，在图上拖拽即可框选模板区域。</p>
+
+    <div v-if="templateSrc" class="template">
+      <p class="hint">本次框选的模板：</p>
+      <img :src="templateSrc" alt="模板预览" />
+    </div>
   </section>
 </template>
 
@@ -181,5 +189,14 @@ button:disabled {
   margin: 0;
   font-size: 12px;
   color: #9ca3af;
+}
+.template {
+  margin-top: 10px;
+}
+.template img {
+  max-width: 220px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  display: block;
 }
 </style>

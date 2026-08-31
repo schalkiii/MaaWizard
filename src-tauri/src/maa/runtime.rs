@@ -200,6 +200,32 @@ impl MaaRuntime {
         inner.tasker.clone().ok_or_else(|| "尚未加载资源".to_string())
     }
 
+    /// 取出控制器的克隆，供运行时的事件回调在识别命中时抓帧（Controller 实现了 Clone）
+    pub fn controller_clone(&self) -> Result<Controller, String> {
+        let inner = self.lock()?;
+        inner
+            .controller
+            .clone()
+            .ok_or_else(|| "尚未连接控制器".to_string())
+    }
+
+    /// 主动向控制器截一帧并保存到文件，便于前端展示「当前屏幕」。
+    /// 若尚未连接控制器则返回错误提示。
+    pub fn controller_screenshot(&self, output: &str) -> Result<String, String> {
+        let controller = self.lock()?.controller.clone().ok_or("尚未连接控制器")?;
+        // 先触发一次截屏，wait 完成后再取缓存帧，保证拿到的是最新画面
+        let job = controller.post_screencap().map_err(|e| e.to_string())?;
+        let _ = controller.wait(job);
+        let image = controller.cached_image().map_err(|e| e.to_string())?;
+        let bytes = image.to_vec().ok_or("无法编码控制器截图")?;
+        let path = resolve_existing_path_allow_missing(output);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        Ok(path.to_string_lossy().to_string())
+    }
+
     /// 在阻塞线程中执行任务：post_task 返回的 Job 需 wait 才是同步等待完成
     pub fn run_task_blocking(tasker: Tasker, entry: &str) -> Result<String, String> {
         if !tasker.inited() {

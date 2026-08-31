@@ -20,13 +20,15 @@
 - **Windows 原生 Rust 已装**（winget Rustlang.Rustup）：rustup 1.29 / rustc 1.98.0 / cargo 1.98.0，`stable-x86_64-pc-windows-msvc`，MSVC 链接器可用。Node v26.7.0 / npm 11.19.0。Rust 亦存在于 WSL（/root/.cargo/bin），但本项目必须用 Windows 原生（Win32 控制器 + Tauri）。
 - **工程已搭建**：`d:/workspace/MaaGeneral` = Tauri2 + Vue3 + Vite + Vue Flow + maa-framework(dynamic)。**阶段 0~5 全部实现并构建通过**（`cargo check` 零警告、`npm run build` 38 模块）。
 - **后端模块划分**：`maa/`(M0运行时)、`pipeline/`(PipelineDocument+V1/V2转换)、`recorder/`(inputbot采集+智能模板+步骤转节点)、`capture/`(scrap截屏+ROI裁剪)、`device/`(Win32窗口列举)、`ai/`(环境探测+外部子进程)、`commands.rs`(命令层)。
-- **前端结构**：`App.vue` 五标签页(运行/图编辑器/录制/设备/AI)；组件 `GraphEditor`(Vue Flow 分层布局，next=蓝实线/on_error=红虚线/[JumpBack]合成节点)、`NodeInspector`(动态表单+帮助)、`RoiCapture`(截图拖拽框选)、`RecorderPanel`、`DevicePanel`、`AiPanel`；`help/registry.ts` 为使用指引注册表。
+- **前端结构**：`App.vue` 五标签页(运行/图编辑器/录制/设备/AI)；图编辑器已重构为三层：`graph.ts`(纯数据映射层 buildLayout/buildNodes/buildEdges/entryNode/hasJumpBack/countIssues，独立可测)、`PipelineNodeView.vue`(自定义节点：识别类型配色+识别/动作徽标+校验角标+入口标记+双出口连接点)、`JumpBackNodeView.vue`(回跳标记)、`GraphEditor.vue`(网格背景/缩放控件/缩略图，拖拽连线增删 next/on_error、点击连线删除、节点位置持久化 localStorage)；其余 `NodeInspector`(动态表单+帮助)、`RoiCapture`(截图拖拽框选)、`RecorderPanel`、`DevicePanel`、`AiPanel`；`help/registry.ts` 为使用指引注册表。
 - **Git 仓库**：`https://github.com/schalkiii/MaaWizard`，main 分支，49 文件 1.4 万行。`.gitignore` 排除 node_modules/dist/target/gen/maa-sdk/.codebuddy。推送身份用 `git -c user.name=<gh用户名> -c user.email=<gh用户名>@users.noreply.github.com` 一次性指定，不改全局 config。
-- **质量门禁（固化到 npm scripts / Makefile）**：`make lint` = markdownlint-cli2（`maa-sdk/` 忽略）+ vue-tsc --noEmit + cargo clippy，三者全绿；`make test` = `cargo test`（38）+ `vitest run`（34），合计 72 个测试全绿。
+- **质量门禁（固化到 npm scripts / Makefile）**：`make lint` = markdownlint-cli2（`maa-sdk/` 忽略）+ vue-tsc --noEmit + cargo clippy，三者全绿；`make test` = `cargo test`（44）+ `vitest run`（63），合计 107 个测试全绿。
 - **前端测试**：vitest 4 + @vue/test-utils 2.5 + jsdom 30；配置 `vitest.config.ts`（jsdom、用例匹配 `src/**/*.spec.ts`），`src/test/setup.ts` 补 ResizeObserver。Vue Flow 相关组件用替身把 nodes/edges 渲染成文本断言，规避 jsdom 无布局能力。
 - **Pipeline 校验**：`src-tauri/src/pipeline/validate.rs` 校验未知类型 / 必填参数 / 悬空跳转 / 纯坐标脆弱性，命令 `pipeline_validate`，前端「校验」面板可点击定位到节点；`save()` 顺带提示错误数。
 - **构建产物**：`src-tauri\target\release\maa-wizard.exe`（免安装）、`bundle\nsis\MaaWizard_0.1.0_x64-setup.exe`（安装包）；`npm run tauri build` 约 2 分钟。**exe 正在运行时构建会因「拒绝访问 (os error 5)」失败，需先关闭应用**。
 - **路径解析**：`resolve_existing_path` / `resolve_existing_path_allow_missing` 沿 cwd 与 exe 目录逐级向上查找（最多 8 层），因此从 `target/release` 直接运行 exe 也能定位到仓库根的 `maa-sdk` 与 `resource`；`maa_userdata` 写在可执行文件旁。真机验收步骤见 `docs/验收清单.md`。
+- **加载动态库**：`load_library` 前必须 `SetDllDirectoryW(<DLL 所在目录>)`，否则 `MaaFramework.dll` 找不到同目录的 `MaaUtils/opencv/onnxruntime` 等依赖，报 `LoadLibraryExW failed`（Windows 不会搜索被加载 DLL 自身的目录）。报错信息已补全路径与排查建议。
+- **tab 白底白字**：`App.vue` 的 scoped `button{color:#fff}` 会命中 `.tabs button`(背景白)，需 `.tabs button{color:#374151}` 显式覆盖，否则未选中 tab 不可见。
 - **MaaFramework SDK**：`maa-sdk/`（MAA-win-x86_64-v5.12.3），经 `make fetch-sdk` 下载。dynamic 链接下编译期不需要 SDK，运行期 `load_library` 才需要。
 - **命令入口**：Makefile（make deps/check/dev/build/fetch-sdk/clean/distclean），清理动作封装在 make clean，不直接执行 rm。
 

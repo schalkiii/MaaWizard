@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import AiPanel from "./components/AiPanel.vue";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import ControllerPanel from "./components/ControllerPanel.vue";
 import DevicePanel from "./components/DevicePanel.vue";
 import GraphEditor from "./components/GraphEditor.vue";
 import type { EdgeKind, NodePosition } from "./components/graph";
@@ -8,6 +9,7 @@ import NodeInspector from "./components/NodeInspector.vue";
 import RecorderPanel from "./components/RecorderPanel.vue";
 import RoiCapture from "./components/RoiCapture.vue";
 import {
+  controllerScreenshot,
   loadLibrary,
   loadResource,
   onMaaEvent,
@@ -26,14 +28,13 @@ import {
   type ValidationIssue,
 } from "./api/maa";
 
-type TabKey = "run" | "editor" | "record" | "device" | "ai";
+type TabKey = "run" | "editor" | "record" | "device";
 
 const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "run", label: "运行" },
   { key: "editor", label: "图编辑器" },
   { key: "record", label: "录制" },
   { key: "device", label: "设备" },
-  { key: "ai", label: "AI" },
 ];
 
 const tab = ref<TabKey>("run");
@@ -44,6 +45,13 @@ const dllPath = ref("maa-sdk/bin/MaaFramework.dll");
 const resourceDir = ref("resource");
 const entry = ref("Demo");
 const controller = ref("none");
+
+// 运行时的识别回显：识别命中后会拿到命中风截图 + 识别框，用于直观展示「匹配到了什么」
+const recognizeImage = ref("");
+const recognizeNode = ref("");
+const recognizeHit = ref(false);
+const recognizeBox = ref<number[] | null>(null);
+const screenImage = ref("");
 
 // 图编辑器
 const document = ref<PipelineDocument>({});
@@ -217,11 +225,61 @@ const selectedNodeData = (): PipelineNodeData | null => {
 };
 
 onMounted(async () => {
-  // 订阅后端推送的节点执行事件，用于调试回显
+  // 订阅后端推送的节点执行事件，回显识别结果与命中截图
   unsubscribe = await onMaaEvent((payload) => {
-    log(`事件 ${payload.message} ${payload.detail}`);
+    if (payload.node) {
+      log(`节点 ${payload.node} ${payload.hit ? "命中" : "未命中"}`);
+    } else {
+      log(`事件 ${payload.message}`);
+    }
+    if (payload.image) {
+      recognizeImage.value = `${convertFileSrc(payload.image)}?t=${Date.now()}`;
+      recognizeNode.value = payload.node;
+      recognizeHit.value = payload.hit;
+      recognizeBox.value = payload.box;
+    }
   });
 });
+
+/** 运行前若未连接控制器，先提示，避免空跑 */
+async function onRunTask() {
+  if (controller.value === "none") {
+    log("请先在上方连接控制设备（桌面窗口或 ADB），否则无法运行");
+    return;
+  }
+  await run("运行任务", () => runTask(entry.value, resourceDir.value));
+}
+
+/** 截取控制器当前画面，方便确认目标窗口与坐标 */
+async function onCaptureScreen() {
+  await run("截取屏幕", async () => {
+    const path = await controllerScreenshot(`${resourceDir.value}/.screen.png`);
+    screenImage.value = `${convertFileSrc(path)}?t=${Date.now()}`;
+    return path;
+  });
+}
+
+/** 识别截图显示后，按实际显示尺寸缩放识别框坐标 */
+const recognizeScale = ref(1);
+function onRecognizeLoad(event: Event) {
+  const img = event.target as HTMLImageElement;
+  if (img.naturalWidth > 0 && img.clientWidth > 0) {
+    recognizeScale.value = img.clientWidth / img.naturalWidth;
+  }
+}
+function boxStyle(box: number[] | null): Record<string, string> {
+  if (!box || box.length < 4) {
+    return {};
+  }
+  const [x, y, w, h] = box;
+  const scale = recognizeScale.value;
+  return {
+    left: `${x * scale}px`,
+    top: `${y * scale}px`,
+    width: `${w * scale}px`,
+    height: `${h * scale}px`,
+  };
+}
 
 onUnmounted(() => {
   unsubscribe?.();
@@ -262,15 +320,44 @@ onUnmounted(() => {
         <button :disabled="busy" @click="run('加载资源', () => loadResource(resourceDir))">
           加载资源
         </button>
+        <button :disabled="busy" @click="run('状态', () => runtimeStatus())">查看状态</button>
       </div>
+
+      <!-- 控制设备连接：不连控制器，pipeline 跑不起来（这是「运行 demo 没反应」的常见原因） -->
+      <ControllerPanel @log="log" @controller="controller = $event" />
 
       <div class="row">
         <input v-model="entry" placeholder="入口节点名" />
-        <button :disabled="busy" @click="run('运行任务', () => runTask(entry))">运行</button>
+        <button :disabled="busy" @click="onRunTask">运行</button>
         <button :disabled="busy" @click="run('停止', () => stopTask())">停止</button>
-        <button :disabled="busy" @click="run('状态', () => runtimeStatus())">查看状态</button>
+        <button :disabled="busy" @click="onCaptureScreen">查看当前屏幕</button>
       </div>
-      <p class="hint">当前控制器：{{ controller }}</p>
+
+      <!-- 当前屏幕：确认目标窗口与坐标是否正确 -->
+      <div v-if="screenImage" class="shot">
+        <img :src="screenImage" alt="当前屏幕" />
+      </div>
+
+      <!-- 识别回显：运行后这里会显示命中风截图与识别框，直观看到「匹配到了什么」 -->
+      <div v-if="recognizeImage" class="shot">
+        <p class="hint">
+          识别预览：节点 <b>{{ recognizeNode }}</b>
+          {{ recognizeHit ? "命中" : "未命中" }}
+          <span v-if="recognizeBox">框=[{{ recognizeBox.join(", ") }}]</span>
+        </p>
+        <div class="stage">
+          <img :src="recognizeImage" alt="识别结果" @load="onRecognizeLoad" />
+          <div
+            v-if="recognizeBox"
+            class="box"
+            :style="boxStyle(recognizeBox)"
+          />
+        </div>
+      </div>
+      <p v-else class="hint">
+        提示：用「图编辑器 → ROI 框选」截屏并框选模板，应用到节点后会变成 TemplateMatch；
+        回到此处运行，即可在这里看到匹配结果。
+      </p>
     </section>
 
     <!-- 图编辑器 -->
@@ -338,9 +425,6 @@ onUnmounted(() => {
 
     <!-- 设备 -->
     <DevicePanel v-else-if="tab === 'device'" @log="log" @controller="controller = $event" />
-
-    <!-- AI -->
-    <AiPanel v-else-if="tab === 'ai'" @log="log" />
 
     <section class="card">
       <h2>日志</h2>
@@ -482,5 +566,24 @@ button:disabled {
 }
 .muted {
   color: #9ca3af;
+}
+.shot {
+  margin: 12px 0;
+}
+.shot img {
+  max-width: 100%;
+  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+}
+.stage {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+}
+.stage .box {
+  position: absolute;
+  border: 2px solid #16a34a;
+  background: rgba(22, 163, 74, 0.18);
+  pointer-events: none;
 }
 </style>

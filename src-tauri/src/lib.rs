@@ -22,6 +22,7 @@ pub fn run() {
             commands::maa_run_task,
             commands::maa_stop,
             commands::maa_status,
+            commands::maa_controller_screenshot,
             // M1 图编辑器
             commands::pipeline_open,
             commands::pipeline_save,

@@ -40,21 +40,79 @@ pub fn maa_load_resource(runtime: State<'_, MaaRuntime>, path: String) -> Result
     runtime.load_resource(&path)
 }
 
-/// 运行任务；同时注册事件回调把节点执行状态推送给前端（阶段 4 调试回显）
+/// 运行任务；同时注册事件回调把节点执行状态推送给前端（阶段 4 调试回显）。
+/// `resource_dir` 用于在识别命中时把当前帧存盘，供前端直观展示「匹配到了什么」。
 #[tauri::command]
 pub async fn maa_run_task(
     app: AppHandle,
     runtime: State<'_, MaaRuntime>,
     entry: String,
+    resource_dir: String,
 ) -> Result<String, String> {
     let tasker = runtime.tasker_clone()?;
+    // 控制器克隆出来放进 sink 闭包：识别命中时抓一帧并保存
+    let controller = runtime.controller_clone().ok();
 
     // Tasker 的 sink 会收到每个节点的识别/动作事件，转发为前端事件用于高亮
     let event_app = app.clone();
+    let snapshot_dir = resolve_existing_path_allow_missing(&resource_dir);
     let _ = tasker.add_sink(move |message: &str, detail: &str| {
+        let mut node = String::new();
+        let mut hit = false;
+        let mut recognition_box: Option<Vec<i32>> = None;
+        let mut image_path = String::new();
+
+        if message == "NodeDetail" {
+            if let Ok(value) = serde_json::from_str::<Value>(detail) {
+                if let Some(name) = value.get("id").and_then(|v| v.as_str()) {
+                    node = name.to_string();
+                } else if let Some(rec) = value.get("recognition") {
+                    if let Some(name) = rec.get("name").and_then(|v| v.as_str()) {
+                        node = name.to_string();
+                    }
+                }
+                if let Some(rec) = value.get("recognition") {
+                    hit = rec.get("hit").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if let Some(array) = rec.get("box").and_then(|v| v.as_array()) {
+                        let nums: Vec<i32> =
+                            array.iter().filter_map(|v| v.as_i64().map(|n| n as i32)).collect();
+                        if nums.len() == 4 {
+                            recognition_box = Some(nums);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 识别命中时，抓当前帧存盘，前端可叠加识别框直观看到匹配结果
+        if hit {
+            if let Some(controller) = &controller {
+                if let Ok(job) = controller.post_screencap() {
+                    let _ = controller.wait(job);
+                    if let Ok(image) = controller.cached_image() {
+                        if let Some(bytes) = image.to_vec() {
+                            let path = snapshot_dir
+                                .join(format!(".recognize_{}.png", chrono::Utc::now().timestamp_millis()));
+                            let _ = std::fs::create_dir_all(&snapshot_dir);
+                            if std::fs::write(&path, bytes).is_ok() {
+                                image_path = path.to_string_lossy().to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let _ = event_app.emit(
             "maa://event",
-            json!({ "message": message, "detail": detail }),
+            json!({
+                "message": message,
+                "detail": detail,
+                "node": node,
+                "hit": hit,
+                "box": recognition_box,
+                "image": image_path,
+            }),
         );
     });
 
@@ -71,6 +129,15 @@ pub fn maa_stop(runtime: State<'_, MaaRuntime>) -> Result<String, String> {
 #[tauri::command]
 pub fn maa_status(runtime: State<'_, MaaRuntime>) -> Result<String, String> {
     runtime.status()
+}
+
+/// 截一帧控制器画面并保存到文件，前端用于展示「当前屏幕」
+#[tauri::command]
+pub fn maa_controller_screenshot(
+    runtime: State<'_, MaaRuntime>,
+    output: String,
+) -> Result<String, String> {
+    runtime.controller_screenshot(&output)
 }
 
 /* ---------------- M1 图编辑器 ---------------- */
