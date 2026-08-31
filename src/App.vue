@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import DevicePanel from "./components/DevicePanel.vue";
+import ControllerPanel from "./components/ControllerPanel.vue";
 import GraphEditor from "./components/GraphEditor.vue";
 import type { EdgeKind, NodePosition } from "./components/graph";
 import NodeInspector from "./components/NodeInspector.vue";
@@ -30,13 +30,12 @@ import {
   type ValidationIssue,
 } from "./api/maa";
 
-type TabKey = "run" | "editor" | "record" | "device";
+type TabKey = "run" | "editor" | "record";
 
 const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "run", label: "运行" },
   { key: "editor", label: "图编辑器" },
   { key: "record", label: "录制" },
-  { key: "device", label: "设备" },
 ];
 
 const tab = ref<TabKey>("run");
@@ -48,6 +47,8 @@ const resourceDir = ref("resource");
 const resourceOptions = ref<string[]>(["resource"]);
 const entry = ref("Demo");
 const controller = ref("none");
+/** 默认实时刷新的运行时状态（无需点击「查看状态」） */
+const liveStatus = ref("");
 
 // 运行时的识别回显：识别命中后会拿到命中风截图 + 识别框，用于直观展示「匹配到了什么」
 const recognizeImage = ref("");
@@ -287,15 +288,38 @@ onMounted(async () => {
       recognizeBox.value = payload.box;
     }
   });
+  // 默认实时刷新运行时状态，无需手动点击「查看状态」
+  liveTimer = window.setInterval(async () => {
+    try {
+      liveStatus.value = await runtimeStatus();
+    } catch {
+      // 库未加载等情况下静默跳过
+    }
+  }, 1500);
+  void refreshLiveStatus();
 });
 
-/** 运行前若未连接控制器，先提示，避免空跑 */
+let liveTimer: number | undefined;
+
+async function refreshLiveStatus() {
+  try {
+    liveStatus.value = await runtimeStatus();
+  } catch {
+    // 库未加载时静默
+  }
+}
+
+/** 运行前先确保控制器已连、对应资源包已加载，避免「Tasker.Task.Failed」 */
 async function onRunTask() {
   if (controller.value === "none") {
     log("请先在上方连接控制设备（桌面窗口或 ADB），否则无法运行");
     return;
   }
-  await run("运行任务", () => runTask(entry.value, resourceDir.value));
+  await run("运行任务", async () => {
+    // 自动按当前资源目录加载，确保入口节点存在于已加载的 bundle 中
+    await loadResource(resourceDir.value);
+    return runTask(entry.value, resourceDir.value);
+  });
 }
 
 /** 截取控制器当前画面，方便确认目标窗口与坐标 */
@@ -347,6 +371,9 @@ function boxStyle(box: number[] | null): Record<string, string> {
 
 onUnmounted(() => {
   unsubscribe?.();
+  if (liveTimer) {
+    window.clearInterval(liveTimer);
+  }
 });
 
 // 切换资源目录后，重新解析各节点的模板图预览
@@ -391,19 +418,15 @@ watch(resourceDir, () => {
         <button :disabled="busy" @click="run('加载资源', () => loadResource(resourceDir))">
           加载资源
         </button>
-        <button :disabled="busy" @click="run('状态', () => runtimeStatus())">查看状态</button>
       </div>
 
-      <!-- 运行页只保留控制器状态摘要；具体连接操作统一到设备页，避免两页重复 -->
-      <section class="controller-summary">
-        <h3>控制器状态</h3>
-        <p v-if="controller === 'none'" class="bad">
-          未连接控制器，任务无法运行
-        </p>
-        <p v-else class="ok">已连接：{{ controller }}</p>
-        <button @click="tab = 'device'">
-          {{ controller === 'none' ? '去设备页连接' : '查看设备页' }}
-        </button>
+      <!-- 设备连接：合并到运行页，不再单独占一个 tab -->
+      <ControllerPanel @log="log" @controller="controller = $event" />
+
+      <!-- 实时状态：默认自动刷新，无需点击「查看状态」 -->
+      <section class="live-status">
+        <h3>运行时状态</h3>
+        <p class="mono">{{ liveStatus || "读取中…" }}</p>
       </section>
 
       <div class="row">
@@ -412,7 +435,7 @@ watch(resourceDir, () => {
         </select>
         <button :disabled="busy" @click="onRunTask">运行</button>
         <button :disabled="busy" @click="run('停止', () => stopTask())">停止</button>
-        <button :disabled="busy" @click="onCaptureScreen">查看当前屏幕</button>
+        <button :disabled="busy" @click="onCaptureScreen">查看窗口画面</button>
       </div>
 
       <!-- 当前屏幕：确认目标窗口与坐标是否正确 -->
@@ -514,9 +537,6 @@ watch(resourceDir, () => {
       @log="log"
       @committed="refreshDocument"
     />
-
-    <!-- 设备 -->
-    <DevicePanel v-else-if="tab === 'device'" @log="log" @controller="controller = $event" />
 
     <section class="card">
       <h2>日志</h2>
@@ -678,34 +698,23 @@ button:disabled {
   background: rgba(22, 163, 74, 0.18);
   pointer-events: none;
 }
-.controller-summary {
+.live-status {
   padding: 12px;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   background: #fafafa;
   margin-bottom: 14px;
 }
-.controller-summary h3 {
+.live-status h3 {
   margin: 0 0 8px;
   font-size: 14px;
 }
-.controller-summary p {
-  margin: 0 0 10px;
-  font-size: 13px;
-}
-.controller-summary .ok {
-  color: #065f46;
-}
-.controller-summary .bad {
-  color: #991b1b;
-}
-.controller-summary button {
-  padding: 6px 12px;
-  border: 1px solid #2563eb;
-  border-radius: 6px;
-  background: #2563eb;
-  color: #fff;
-  cursor: pointer;
-  font-size: 13px;
+.live-status .mono {
+  margin: 0;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #374151;
+  word-break: break-all;
 }
 </style>

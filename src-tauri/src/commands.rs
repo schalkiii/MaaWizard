@@ -293,7 +293,8 @@ pub fn device_list_windows(runtime: State<'_, MaaRuntime>) -> Result<Vec<device:
 /* ---------------- 资源与模板 ---------------- */
 
 /// 列出可选的资源包目录：默认 `resource` 本身，加上它下面看起来像 Maa 资源包的一级子目录。
-/// 判断标准：目录里包含 pipeline/、image/ 或任意 .json 文件。
+/// 判断标准：目录里包含 `pipeline/` 或 `image/` 子目录（即一个标准 Maa 资源包骨架）。
+/// 注意：不能把内部目录（如 `resource/pipeline` 本身）也当成资源包列出来。
 #[tauri::command]
 pub fn list_resources() -> Result<Vec<String>, String> {
     let root = resolve_existing_path("resource");
@@ -322,21 +323,7 @@ pub fn list_resources() -> Result<Vec<String>, String> {
 }
 
 fn looks_like_resource_bundle(dir: &std::path::Path) -> bool {
-    if !dir.is_dir() {
-        return false;
-    }
-    if dir.join("pipeline").is_dir() || dir.join("image").is_dir() {
-        return true;
-    }
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("json") {
-                return true;
-            }
-        }
-    }
-    false
+    dir.join("pipeline").is_dir() || dir.join("image").is_dir()
 }
 
 /// 新建一个空的 Maa 资源包：创建 <resource>/<name>/{pipeline,image}/，并写入一个最小 pipeline。

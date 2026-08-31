@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use maa_framework::controller::Controller;
 use maa_framework::resource::Resource;
+use maa_framework::MaaStatus;
 use maa_framework::sys::{
     MaaWin32InputMethod as Win32InputMethod, MaaWin32InputMethod_Seize,
     MaaWin32ScreencapMethod as Win32ScreencapMethod, MaaWin32ScreencapMethod_All,
@@ -241,7 +242,13 @@ impl MaaRuntime {
             return Err("资源或控制器尚未绑定，请先加载资源并连接设备".to_string());
         }
         let job = tasker.post_task(entry, "{}").map_err(|e| e.to_string())?;
-        let _ = job.wait();
+        // wait 返回 SUCCEEDED 才代表任务成功执行（如入口节点不存在会返回 FAILED）
+        if job.wait() != MaaStatus::SUCCEEDED {
+            return Err(format!(
+                "任务 {} 执行失败：请确认入口节点名存在于已加载的资源包中",
+                entry
+            ));
+        }
         Ok(format!("任务 {} 执行完成", entry))
     }
 
