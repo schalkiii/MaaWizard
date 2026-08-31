@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import ControllerPanel from "./components/ControllerPanel.vue";
 import DevicePanel from "./components/DevicePanel.vue";
 import GraphEditor from "./components/GraphEditor.vue";
 import type { EdgeKind, NodePosition } from "./components/graph";
@@ -10,6 +9,7 @@ import RecorderPanel from "./components/RecorderPanel.vue";
 import RoiCapture from "./components/RoiCapture.vue";
 import {
   controllerScreenshot,
+  createResourceBundle,
   listResources,
   loadLibrary,
   loadResource,
@@ -62,6 +62,7 @@ const selectedNode = ref<string | null>(null);
 const saveVersion = ref("V2");
 /** 节点名 → 模板图片地址（按资源目录解析后），供图编辑器预览 TemplateMatch 匹配的图 */
 const templateImages = ref<Record<string, string>>({});
+const newBundleName = ref("");
 
 // 校验结果
 const issues = ref<ValidationIssue[]>([]);
@@ -306,6 +307,22 @@ async function onCaptureScreen() {
   });
 }
 
+async function onCreateBundle() {
+  const name = newBundleName.value.trim();
+  if (!name) {
+    log("请输入资源包名称");
+    return;
+  }
+  await run("新建资源包", async () => {
+    const path = await createResourceBundle(name);
+    resourceOptions.value = await listResources();
+    resourceDir.value = path;
+    newBundleName.value = "";
+    await onOpenPipeline();
+    return path;
+  });
+}
+
 /** 识别截图显示后，按实际显示尺寸缩放识别框坐标 */
 const recognizeScale = ref(1);
 function onRecognizeLoad(event: Event) {
@@ -377,8 +394,17 @@ watch(resourceDir, () => {
         <button :disabled="busy" @click="run('状态', () => runtimeStatus())">查看状态</button>
       </div>
 
-      <!-- 控制设备连接：不连控制器，pipeline 跑不起来（这是「运行 demo 没反应」的常见原因） -->
-      <ControllerPanel @log="log" @controller="controller = $event" />
+      <!-- 运行页只保留控制器状态摘要；具体连接操作统一到设备页，避免两页重复 -->
+      <section class="controller-summary">
+        <h3>控制器状态</h3>
+        <p v-if="controller === 'none'" class="bad">
+          未连接控制器，任务无法运行
+        </p>
+        <p v-else class="ok">已连接：{{ controller }}</p>
+        <button @click="tab = 'device'">
+          {{ controller === 'none' ? '去设备页连接' : '查看设备页' }}
+        </button>
+      </section>
 
       <div class="row">
         <select v-model="entry" title="入口节点名">
@@ -424,6 +450,13 @@ watch(resourceDir, () => {
           <option v-for="opt in resourceOptions" :key="opt" :value="opt">{{ opt }}</option>
         </select>
         <button :disabled="busy" @click="onOpenPipeline">打开</button>
+        <input
+          v-model="newBundleName"
+          placeholder="新资源包名称"
+          style="width: 120px"
+          @keydown.enter.prevent="onCreateBundle"
+        />
+        <button :disabled="busy || !newBundleName.trim()" @click="onCreateBundle">新建</button>
         <select v-model="saveVersion">
           <option value="V1">导出 V1</option>
           <option value="V2">导出 V2</option>
@@ -644,5 +677,35 @@ button:disabled {
   border: 2px solid #16a34a;
   background: rgba(22, 163, 74, 0.18);
   pointer-events: none;
+}
+.controller-summary {
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fafafa;
+  margin-bottom: 14px;
+}
+.controller-summary h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.controller-summary p {
+  margin: 0 0 10px;
+  font-size: 13px;
+}
+.controller-summary .ok {
+  color: #065f46;
+}
+.controller-summary .bad {
+  color: #991b1b;
+}
+.controller-summary button {
+  padding: 6px 12px;
+  border: 1px solid #2563eb;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
 }
 </style>

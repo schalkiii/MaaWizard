@@ -21,6 +21,8 @@ const selectedDevice = ref<AdbDeviceInfo | null>(null);
 const selectedWindow = ref<WindowInfo | null>(null);
 const status = ref("");
 const busy = ref(false);
+const windowsExpanded = ref(true);
+const devicesExpanded = ref(true);
 
 async function run(label: string, action: () => Promise<string>) {
   busy.value = true;
@@ -76,6 +78,7 @@ function onConnectAdb() {
   run("连接 ADB", async () => {
     const result = await connectAdb(device.adb_path, device.address, device.config);
     emit("controller", "adb");
+    devicesExpanded.value = false;
     return result;
   });
 }
@@ -89,6 +92,7 @@ function onConnectWindow() {
   run("连接 Win32", async () => {
     const result = await connectWin32(window.hwnd);
     emit("controller", "win32");
+    windowsExpanded.value = false;
     return result;
   });
 }
@@ -103,40 +107,56 @@ void refreshStatus();
       {{ status }}
     </p>
 
-    <h4>桌面窗口（Win32）</h4>
-    <div class="row">
-      <button :disabled="busy" @click="onRefreshWindows">刷新窗口</button>
-      <button :disabled="busy || !selectedWindow" @click="onConnectWindow">连接选中窗口</button>
+    <div class="section-header" @click="windowsExpanded = !windowsExpanded">
+      <span class="toggle">{{ windowsExpanded ? '▼' : '▶' }}</span>
+      <h4>桌面窗口（Win32）</h4>
+      <span v-if="selectedWindow && !windowsExpanded" class="muted selected-name">
+        {{ selectedWindow.window_name }}
+      </span>
     </div>
-    <ul class="list">
-      <li
-        v-for="window in windows"
-        :key="window.hwnd"
-        :class="{ selected: selectedWindow?.hwnd === window.hwnd }"
-        @click="selectedWindow = window"
-      >
-        {{ window.window_name }}
-        <span class="muted">hwnd={{ window.hwnd }}</span>
-      </li>
-      <li v-if="windows.length === 0" class="muted">暂无窗口，点击刷新</li>
-    </ul>
+    <div v-show="windowsExpanded">
+      <div class="row">
+        <button :disabled="busy" @click="onRefreshWindows">刷新窗口</button>
+        <button :disabled="busy || !selectedWindow" @click="onConnectWindow">连接选中窗口</button>
+      </div>
+      <ul class="list">
+        <li
+          v-for="window in windows"
+          :key="window.hwnd"
+          :class="{ selected: selectedWindow?.hwnd === window.hwnd }"
+          @click="selectedWindow = window"
+        >
+          {{ window.window_name }}
+          <span class="muted">hwnd={{ window.hwnd }}</span>
+        </li>
+        <li v-if="windows.length === 0" class="muted">暂无窗口，点击刷新</li>
+      </ul>
+    </div>
 
-    <h4>ADB 设备（Android）</h4>
-    <div class="row">
-      <button :disabled="busy" @click="onRefreshDevices">刷新设备</button>
-      <button :disabled="busy || !selectedDevice" @click="onConnectAdb">连接选中设备</button>
+    <div class="section-header" @click="devicesExpanded = !devicesExpanded">
+      <span class="toggle">{{ devicesExpanded ? '▼' : '▶' }}</span>
+      <h4>ADB 设备（Android）</h4>
+      <span v-if="selectedDevice && !devicesExpanded" class="muted selected-name">
+        {{ selectedDevice.address }}
+      </span>
     </div>
-    <ul class="list">
-      <li
-        v-for="device in devices"
-        :key="device.address"
-        :class="{ selected: selectedDevice?.address === device.address }"
-        @click="selectedDevice = device"
-      >
-        {{ device.address }}
-      </li>
-      <li v-if="devices.length === 0" class="muted">暂无设备，点击刷新</li>
-    </ul>
+    <div v-show="devicesExpanded">
+      <div class="row">
+        <button :disabled="busy" @click="onRefreshDevices">刷新设备</button>
+        <button :disabled="busy || !selectedDevice" @click="onConnectAdb">连接选中设备</button>
+      </div>
+      <ul class="list">
+        <li
+          v-for="device in devices"
+          :key="device.address"
+          :class="{ selected: selectedDevice?.address === device.address }"
+          @click="selectedDevice = device"
+        >
+          {{ device.address }}
+        </li>
+        <li v-if="devices.length === 0" class="muted">暂无设备，点击刷新</li>
+      </ul>
+    </div>
   </section>
 </template>
 
@@ -212,5 +232,29 @@ button:disabled {
 }
 .muted {
   color: #9ca3af;
+}
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 14px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.section-header h4 {
+  margin: 0;
+}
+.section-header .toggle {
+  font-size: 12px;
+  color: #6b7280;
+}
+.section-header .selected-name {
+  margin-left: auto;
+  font-size: 12px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

@@ -292,25 +292,79 @@ pub fn device_list_windows(runtime: State<'_, MaaRuntime>) -> Result<Vec<device:
 
 /* ---------------- 资源与模板 ---------------- */
 
-/// 列出可选的资源包目录：默认 `resource` 本身，加上它下面的一级子目录
-/// （每个子目录通常是一个 Maa 资源包，内含 pipeline/ 与 image/）。
+/// 列出可选的资源包目录：默认 `resource` 本身，加上它下面看起来像 Maa 资源包的一级子目录。
+/// 判断标准：目录里包含 pipeline/、image/ 或任意 .json 文件。
 #[tauri::command]
 pub fn list_resources() -> Result<Vec<String>, String> {
     let root = resolve_existing_path("resource");
-    let mut dirs = vec!["resource".to_string()];
+    let mut dirs = Vec::new();
+    if root.is_dir() && looks_like_resource_bundle(&root) {
+        dirs.push("resource".to_string());
+    }
     if root.is_dir() {
         if let Ok(entries) = std::fs::read_dir(&root) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
                     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        dirs.push(format!("resource/{}", name));
+                        if looks_like_resource_bundle(&path) {
+                            dirs.push(format!("resource/{}", name));
+                        }
                     }
                 }
             }
         }
     }
+    if dirs.is_empty() {
+        dirs.push("resource".to_string());
+    }
     Ok(dirs)
+}
+
+fn looks_like_resource_bundle(dir: &std::path::Path) -> bool {
+    if !dir.is_dir() {
+        return false;
+    }
+    if dir.join("pipeline").is_dir() || dir.join("image").is_dir() {
+        return true;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("json") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 新建一个空的 Maa 资源包：创建 <resource>/<name>/{pipeline,image}/，并写入一个最小 pipeline。
+#[tauri::command]
+pub fn create_resource_bundle(name: String) -> Result<String, String> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err("资源包名称不能为空或包含路径分隔符".to_string());
+    }
+    let root = resolve_existing_path("resource");
+    let dir = root.join(&name);
+    if dir.exists() {
+        return Err(format!("资源包 resource/{} 已存在", name));
+    }
+    std::fs::create_dir_all(dir.join("pipeline")).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(dir.join("image")).map_err(|e| e.to_string())?;
+    let starter = json!({
+        "Start": {
+            "recognition": "DirectHit",
+            "action": "DoNothing",
+            "next": []
+        }
+    });
+    std::fs::write(
+        dir.join("pipeline").join("my_pipeline.json"),
+        serde_json::to_string_pretty(&starter).unwrap(),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(format!("resource/{}", name))
 }
 
 /// 解析模板匹配用到的模板图片真实路径。模板名在 pipeline 里通常不带扩展名，

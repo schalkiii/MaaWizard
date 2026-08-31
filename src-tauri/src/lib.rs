@@ -61,6 +61,7 @@ pub fn run() {
             commands::device_list_windows,
             commands::list_resources,
             commands::template_image,
+            commands::create_resource_bundle,
             // M6 AI 增强
             commands::ai_detect,
             commands::ai_run,
