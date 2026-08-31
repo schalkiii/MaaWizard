@@ -1,5 +1,5 @@
 use std::os::raw::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -60,9 +60,8 @@ impl MaaRuntime {
         let resolved = resolve_existing_path(dll_path);
         maa_framework::load_library(&resolved).map_err(|e| e.to_string())?;
 
-        let user_path = std::env::current_dir()
-            .map_err(|e| e.to_string())?
-            .join("maa_userdata");
+        // 用户数据放在可执行文件旁边，避免 dev 模式下污染源码目录
+        let user_path = current_exe_dir().join("maa_userdata");
         std::fs::create_dir_all(&user_path).map_err(|e| e.to_string())?;
         Toolkit::init_option(user_path.to_str().unwrap_or("."), "{}").map_err(|e| e.to_string())?;
 
@@ -226,61 +225,150 @@ impl MaaRuntime {
     }
 }
 
-/// 解析用户输入的路径。
-/// `tauri dev` 下当前目录是 src-tauri，而 SDK 与资源位于仓库根目录，
-/// 因此依次尝试：原样 → 当前目录 → 上级目录 → 可执行文件所在目录。
+/// 解析用户输入的读取路径。
+/// 程序可能从任意目录启动（`tauri dev` 时 cwd 是 src-tauri，直接跑 release exe 时是 target/release），
+/// 而 SDK 与资源位于仓库根目录，因此沿当前目录与可执行文件目录**逐级向上**查找。
 pub fn resolve_existing_path(input: &str) -> PathBuf {
     let direct = PathBuf::from(input);
-    if direct.exists() {
+    if direct.is_absolute() || direct.exists() {
         return direct;
     }
-
-    if let Ok(cwd) = std::env::current_dir() {
-        let in_cwd = cwd.join(input);
-        if in_cwd.exists() {
-            return in_cwd;
-        }
-        if let Some(parent) = cwd.parent() {
-            let in_parent = parent.join(input);
-            if in_parent.exists() {
-                return in_parent;
-            }
-        }
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            let near_exe = exe_dir.join(input);
-            if near_exe.exists() {
-                return near_exe;
-            }
-        }
-    }
-
-    direct
+    resolve_in_bases(input, &candidate_bases(), false).unwrap_or(direct)
 }
 
-/// 解析保存目标路径：目标本身可能尚不存在，此时基于仓库根目录推导，
-/// 使 dev 模式下默认保存位置与资源目录保持一致。
+/// 解析写入目标路径：目标本身可能尚不存在，此时落到「父目录已存在」的候选，
+/// 保证模板图与截图写进既有的 resource/ 目录，而不是散落到构建产物里。
 pub fn resolve_existing_path_allow_missing(input: &str) -> PathBuf {
     let direct = PathBuf::from(input);
     if direct.is_absolute() || direct.exists() {
         return direct;
     }
+    let bases = candidate_bases();
+    resolve_in_bases(input, &bases, true)
+        .or_else(|| bases.first().map(|base| base.join(&direct)))
+        .unwrap_or(direct)
+}
 
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Some(parent) = cwd.parent() {
-            let candidate = parent.join(&direct);
-            if candidate
-                .parent()
-                .map(|dir| dir.exists())
-                .unwrap_or(false)
-            {
-                return candidate;
+/// 在候选基目录中解析相对路径。
+/// `require_parent` 为真时匹配「父目录已存在」的候选（写入场景），否则匹配「自身存在」的候选（读取场景）。
+fn resolve_in_bases(input: &str, bases: &[PathBuf], require_parent: bool) -> Option<PathBuf> {
+    let direct = PathBuf::from(input);
+    for base in bases {
+        let candidate = base.join(&direct);
+        if require_parent {
+            if candidate.parent().map(|dir| dir.exists()).unwrap_or(false) {
+                return Some(candidate);
             }
+        } else if candidate.exists() {
+            return Some(candidate);
         }
-        return cwd.join(&direct);
+    }
+    None
+}
+
+/// 可执行文件所在目录；取不到时退回当前目录
+fn current_exe_dir() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            return dir.to_path_buf();
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// 候选基目录：当前目录及其各级上级，随后是可执行文件所在目录及其各级上级。
+fn candidate_bases() -> Vec<PathBuf> {
+    let mut bases = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        push_ancestors(&mut bases, &cwd);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            push_ancestors(&mut bases, dir);
+        }
+    }
+    bases
+}
+
+/// 把目录自身与其各级上级目录加入候选，最多向上 8 层
+fn push_ancestors(bases: &mut Vec<PathBuf>, start: &Path) {
+    let mut current = start.to_path_buf();
+    for _ in 0..8 {
+        if current.as_os_str().is_empty() {
+            break;
+        }
+        bases.push(current.clone());
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => break,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("maawiz_{}_{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
     }
 
-    direct
+    #[test]
+    fn ancestors_are_collected_upward() {
+        let mut bases = Vec::new();
+        push_ancestors(&mut bases, Path::new("a/b/c"));
+        assert_eq!(
+            bases,
+            vec![PathBuf::from("a/b/c"), PathBuf::from("a/b"), PathBuf::from("a")]
+        );
+    }
+
+    #[test]
+    fn reads_existing_file_from_a_deeper_base() {
+        let dir = temp_dir("read");
+        let nested = dir.join("a/b/c");
+        std::fs::create_dir_all(nested.join("maa-sdk/bin")).unwrap();
+        std::fs::write(nested.join("maa-sdk/bin/MaaFramework.dll"), b"x").unwrap();
+
+        // 前两个候选下没有该文件，应继续向下找
+        let bases = vec![dir.join("x/y"), dir.join("a/b"), nested.clone()];
+        let resolved = resolve_in_bases("maa-sdk/bin/MaaFramework.dll", &bases, false).unwrap();
+        assert_eq!(resolved, nested.join("maa-sdk/bin/MaaFramework.dll"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_target_lands_where_parent_directory_exists() {
+        let dir = temp_dir("write");
+        std::fs::create_dir_all(dir.join("resource")).unwrap();
+
+        // 第一个候选（模拟 target/release）下没有 resource，应跳过它
+        let bases = vec![dir.join("target/release"), dir.clone()];
+        let resolved = resolve_in_bases("resource/.screenshot.png", &bases, true).unwrap();
+        assert_eq!(resolved, dir.join("resource/.screenshot.png"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_returns_none_when_no_base_matches() {
+        let bases = vec![PathBuf::from("definitely/not/here")];
+        assert!(resolve_in_bases("nope/file.txt", &bases, false).is_none());
+        assert!(resolve_in_bases("nope/file.txt", &bases, true).is_none());
+    }
+
+    #[test]
+    fn absolute_paths_are_kept_as_is() {
+        let absolute = if cfg!(windows) { "C:/definitely/not/here.txt" } else { "/definitely/not/here.txt" };
+        assert_eq!(resolve_existing_path(absolute), PathBuf::from(absolute));
+        assert_eq!(
+            resolve_existing_path_allow_missing(absolute),
+            PathBuf::from(absolute)
+        );
+    }
 }
