@@ -22,7 +22,9 @@
 - **后端模块划分**：`maa/`(M0运行时)、`pipeline/`(PipelineDocument+V1/V2转换)、`recorder/`(inputbot采集+智能模板+步骤转节点)、`capture/`(scrap截屏+ROI裁剪)、`device/`(Win32窗口列举)、`ai/`(环境探测+外部子进程)、`commands.rs`(命令层)。
 - **前端结构**：`App.vue` 五标签页(运行/图编辑器/录制/设备/AI)；组件 `GraphEditor`(Vue Flow 分层布局，next=蓝实线/on_error=红虚线/[JumpBack]合成节点)、`NodeInspector`(动态表单+帮助)、`RoiCapture`(截图拖拽框选)、`RecorderPanel`、`DevicePanel`、`AiPanel`；`help/registry.ts` 为使用指引注册表。
 - **Git 仓库**：`https://github.com/schalkiii/MaaWizard`，main 分支，49 文件 1.4 万行。`.gitignore` 排除 node_modules/dist/target/gen/maa-sdk/.codebuddy。推送身份用 `git -c user.name=<gh用户名> -c user.email=<gh用户名>@users.noreply.github.com` 一次性指定，不改全局 config。
-- **质量门禁（固化到 npm scripts / Makefile）**：`make lint` = markdownlint-cli2（`docs/**` 参与，`maa-sdk/` 忽略）+ vue-tsc --noEmit + cargo clippy，三者全绿；`make test` = `cargo test`（25 个单测）。
+- **质量门禁（固化到 npm scripts / Makefile）**：`make lint` = markdownlint-cli2（`maa-sdk/` 忽略）+ vue-tsc --noEmit + cargo clippy，三者全绿；`make test` = `cargo test`（38）+ `vitest run`（34），合计 72 个测试全绿。
+- **前端测试**：vitest 4 + @vue/test-utils 2.5 + jsdom 30；配置 `vitest.config.ts`（jsdom、用例匹配 `src/**/*.spec.ts`），`src/test/setup.ts` 补 ResizeObserver。Vue Flow 相关组件用替身把 nodes/edges 渲染成文本断言，规避 jsdom 无布局能力。
+- **Pipeline 校验**：`src-tauri/src/pipeline/validate.rs` 校验未知类型 / 必填参数 / 悬空跳转 / 纯坐标脆弱性，命令 `pipeline_validate`，前端「校验」面板可点击定位到节点；`save()` 顺带提示错误数。
 - **MaaFramework SDK**：`maa-sdk/`（MAA-win-x86_64-v5.12.3），经 `make fetch-sdk` 下载。dynamic 链接下编译期不需要 SDK，运行期 `load_library` 才需要。
 - **命令入口**：Makefile（make deps/check/dev/build/fetch-sdk/clean/distclean），清理动作封装在 make clean，不直接执行 rm。
 
