@@ -22,7 +22,6 @@ import {
   pipelineUpdateNode,
   pipelineValidate,
   runTask,
-  runtimeStatus,
   stopTask,
   templateImage,
   type PipelineDocument,
@@ -47,8 +46,6 @@ const resourceDir = ref("resource");
 const resourceOptions = ref<string[]>(["resource"]);
 const entry = ref("Demo");
 const controller = ref("none");
-/** 默认实时刷新的运行时状态（无需点击「查看状态」） */
-const liveStatus = ref("");
 
 // 运行时的识别回显：识别命中后会拿到命中风截图 + 识别框，用于直观展示「匹配到了什么」
 const recognizeImage = ref("");
@@ -288,26 +285,7 @@ onMounted(async () => {
       recognizeBox.value = payload.box;
     }
   });
-  // 默认实时刷新运行时状态，无需手动点击「查看状态」
-  liveTimer = window.setInterval(async () => {
-    try {
-      liveStatus.value = await runtimeStatus();
-    } catch {
-      // 库未加载等情况下静默跳过
-    }
-  }, 1500);
-  void refreshLiveStatus();
 });
-
-let liveTimer: number | undefined;
-
-async function refreshLiveStatus() {
-  try {
-    liveStatus.value = await runtimeStatus();
-  } catch {
-    // 库未加载时静默
-  }
-}
 
 /** 运行前先确保控制器已连、对应资源包已加载，避免「Tasker.Task.Failed」 */
 async function onRunTask() {
@@ -371,9 +349,6 @@ function boxStyle(box: number[] | null): Record<string, string> {
 
 onUnmounted(() => {
   unsubscribe?.();
-  if (liveTimer) {
-    window.clearInterval(liveTimer);
-  }
 });
 
 // 切换资源目录后，重新解析各节点的模板图预览
@@ -422,12 +397,6 @@ watch(resourceDir, () => {
 
       <!-- 设备连接：合并到运行页，不再单独占一个 tab -->
       <ControllerPanel @log="log" @controller="controller = $event" />
-
-      <!-- 实时状态：默认自动刷新，无需点击「查看状态」 -->
-      <section class="live-status">
-        <h3>运行时状态</h3>
-        <p class="mono">{{ liveStatus || "读取中…" }}</p>
-      </section>
 
       <div class="row">
         <select v-model="entry" title="入口节点名">
@@ -697,24 +666,5 @@ button:disabled {
   border: 2px solid #16a34a;
   background: rgba(22, 163, 74, 0.18);
   pointer-events: none;
-}
-.live-status {
-  padding: 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #fafafa;
-  margin-bottom: 14px;
-}
-.live-status h3 {
-  margin: 0 0 8px;
-  font-size: 14px;
-}
-.live-status .mono {
-  margin: 0;
-  font-family: Consolas, "Courier New", monospace;
-  font-size: 12px;
-  line-height: 1.7;
-  color: #374151;
-  word-break: break-all;
 }
 </style>

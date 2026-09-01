@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import {
   connectAdb,
   connectWin32,
@@ -9,20 +9,31 @@ import {
   type AdbDeviceInfo,
   type WindowInfo,
 } from "../api/maa";
+import {
+  devices,
+  selectedDevice,
+  selectedWindow,
+  showAllDevices,
+  showAllWindows,
+  windows,
+} from "./deviceStore";
 
 const emit = defineEmits<{
   (event: "log", message: string): void;
   (event: "controller", type: string): void;
 }>();
 
-const devices = ref<AdbDeviceInfo[]>([]);
-const windows = ref<WindowInfo[]>([]);
-const selectedDevice = ref<AdbDeviceInfo | null>(null);
-const selectedWindow = ref<WindowInfo | null>(null);
 const status = ref("");
 const busy = ref(false);
-const windowsExpanded = ref(true);
-const devicesExpanded = ref(true);
+let statusTimer: number | undefined;
+
+/** 连接后只展示已连的那一项，缩短滚动条 */
+const displayWindows = computed(() =>
+  showAllWindows.value || !selectedWindow.value ? windows.value : [selectedWindow.value!],
+);
+const displayDevices = computed(() =>
+  showAllDevices.value || !selectedDevice.value ? devices.value : [selectedDevice.value!],
+);
 
 async function run(label: string, action: () => Promise<string>) {
   busy.value = true;
@@ -78,7 +89,7 @@ function onConnectAdb() {
   run("连接 ADB", async () => {
     const result = await connectAdb(device.adb_path, device.address, device.config);
     emit("controller", "adb");
-    devicesExpanded.value = false;
+    showAllDevices.value = false;
     return result;
   });
 }
@@ -92,71 +103,74 @@ function onConnectWindow() {
   run("连接 Win32", async () => {
     const result = await connectWin32(window.hwnd);
     emit("controller", "win32");
-    windowsExpanded.value = false;
+    showAllWindows.value = false;
     return result;
   });
 }
 
-void refreshStatus();
+onMounted(() => {
+  void refreshStatus();
+  // 默认实时刷新连接状态，无需手动点击「查看状态」
+  statusTimer = window.setInterval(() => void refreshStatus(), 1500);
+});
+onUnmounted(() => {
+  if (statusTimer) {
+    window.clearInterval(statusTimer);
+  }
+});
 </script>
 
 <template>
   <section class="panel">
     <h3>连接控制设备</h3>
-    <p v-if="status" class="status" :class="{ ok: status.includes('控制器已连接=true'), bad: status.includes('控制器未连接') }">
+    <p
+      v-if="status"
+      class="status"
+      :class="{ ok: status.includes('控制器已连接=true'), bad: status.includes('控制器未连接') }"
+    >
       {{ status }}
     </p>
 
-    <div class="section-header" @click="windowsExpanded = !windowsExpanded">
-      <span class="toggle">{{ windowsExpanded ? '▼' : '▶' }}</span>
-      <h4>桌面窗口（Win32）</h4>
-      <span v-if="selectedWindow && !windowsExpanded" class="muted selected-name">
-        {{ selectedWindow.window_name }}
-      </span>
+    <h4>桌面窗口（Win32）</h4>
+    <div class="row">
+      <button :disabled="busy" @click="onRefreshWindows">刷新窗口</button>
+      <button :disabled="busy || !selectedWindow" @click="onConnectWindow">连接选中窗口</button>
+      <button v-if="selectedWindow && !showAllWindows" class="ghost" @click="showAllWindows = true">
+        切换窗口
+      </button>
     </div>
-    <div v-show="windowsExpanded">
-      <div class="row">
-        <button :disabled="busy" @click="onRefreshWindows">刷新窗口</button>
-        <button :disabled="busy || !selectedWindow" @click="onConnectWindow">连接选中窗口</button>
-      </div>
-      <ul class="list">
-        <li
-          v-for="window in windows"
-          :key="window.hwnd"
-          :class="{ selected: selectedWindow?.hwnd === window.hwnd }"
-          @click="selectedWindow = window"
-        >
-          {{ window.window_name }}
-          <span class="muted">hwnd={{ window.hwnd }}</span>
-        </li>
-        <li v-if="windows.length === 0" class="muted">暂无窗口，点击刷新</li>
-      </ul>
-    </div>
+    <ul class="list">
+      <li
+        v-for="window in displayWindows"
+        :key="window.hwnd"
+        :class="{ selected: selectedWindow?.hwnd === window.hwnd }"
+        @click="selectedWindow = window"
+      >
+        {{ window.window_name }}
+        <span class="muted">hwnd={{ window.hwnd }}</span>
+      </li>
+      <li v-if="displayWindows.length === 0" class="muted">暂无窗口，点击刷新</li>
+    </ul>
 
-    <div class="section-header" @click="devicesExpanded = !devicesExpanded">
-      <span class="toggle">{{ devicesExpanded ? '▼' : '▶' }}</span>
-      <h4>ADB 设备（Android）</h4>
-      <span v-if="selectedDevice && !devicesExpanded" class="muted selected-name">
-        {{ selectedDevice.address }}
-      </span>
+    <h4>ADB 设备（Android）</h4>
+    <div class="row">
+      <button :disabled="busy" @click="onRefreshDevices">刷新设备</button>
+      <button :disabled="busy || !selectedDevice" @click="onConnectAdb">连接选中设备</button>
+      <button v-if="selectedDevice && !showAllDevices" class="ghost" @click="showAllDevices = true">
+        切换设备
+      </button>
     </div>
-    <div v-show="devicesExpanded">
-      <div class="row">
-        <button :disabled="busy" @click="onRefreshDevices">刷新设备</button>
-        <button :disabled="busy || !selectedDevice" @click="onConnectAdb">连接选中设备</button>
-      </div>
-      <ul class="list">
-        <li
-          v-for="device in devices"
-          :key="device.address"
-          :class="{ selected: selectedDevice?.address === device.address }"
-          @click="selectedDevice = device"
-        >
-          {{ device.address }}
-        </li>
-        <li v-if="devices.length === 0" class="muted">暂无设备，点击刷新</li>
-      </ul>
-    </div>
+    <ul class="list">
+      <li
+        v-for="device in displayDevices"
+        :key="device.address"
+        :class="{ selected: selectedDevice?.address === device.address }"
+        @click="selectedDevice = device"
+      >
+        {{ device.address }}
+      </li>
+      <li v-if="displayDevices.length === 0" class="muted">暂无设备，点击刷新</li>
+    </ul>
   </section>
 </template>
 
@@ -197,6 +211,7 @@ h4 {
   display: flex;
   gap: 8px;
   margin-bottom: 8px;
+  flex-wrap: wrap;
 }
 button {
   padding: 6px 12px;
@@ -210,6 +225,10 @@ button {
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+button.ghost {
+  background: #fff;
+  color: #2563eb;
 }
 .list {
   list-style: none;
@@ -232,29 +251,5 @@ button:disabled {
 }
 .muted {
   color: #9ca3af;
-}
-.section-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 14px;
-  margin-bottom: 6px;
-  cursor: pointer;
-  user-select: none;
-}
-.section-header h4 {
-  margin: 0;
-}
-.section-header .toggle {
-  font-size: 12px;
-  color: #6b7280;
-}
-.section-header .selected-name {
-  margin-left: auto;
-  font-size: 12px;
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 </style>

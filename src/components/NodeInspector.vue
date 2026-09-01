@@ -5,6 +5,7 @@ import {
   ACTION_HELP,
   ACTION_TYPES,
   contextualHints,
+  defaultParam,
   NODE_FIELD_HELP,
   RECOGNITION_HELP,
   RECOGNITION_TYPES,
@@ -73,6 +74,24 @@ const hints = computed(() =>
   contextualHints(recognitionType.value, actionType.value, props.controller),
 );
 
+/** 参数框为空或仅 {} 时，视为未填写，切换类型时预填推荐默认值 */
+function isEmptyParam(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed === "" || trimmed === "{}";
+}
+
+function onRecognitionChange() {
+  if (isEmptyParam(recognitionParam.value)) {
+    recognitionParam.value = defaultParam("recognition", recognitionType.value);
+  }
+}
+
+function onActionChange() {
+  if (isEmptyParam(actionParam.value)) {
+    actionParam.value = defaultParam("action", actionType.value);
+  }
+}
+
 function save() {
   let recognition: Record<string, unknown> = {};
   let action: Record<string, unknown> = {};
@@ -127,7 +146,7 @@ function removeEntry(list: "next" | "error", index: number) {
 
     <label>
       识别类型
-      <select v-model="recognitionType">
+      <select v-model="recognitionType" @change="onRecognitionChange">
         <option v-for="item in RECOGNITION_TYPES" :key="item" :value="item">{{ item }}</option>
       </select>
     </label>
@@ -140,10 +159,11 @@ function removeEntry(list: "next" | "error", index: number) {
       </li>
     </ul>
     <textarea v-model="recognitionParam" rows="4" spellcheck="false" />
+    <p class="example">推荐默认值：<code>{{ defaultParam("recognition", recognitionType) }}</code></p>
 
     <label>
       动作类型
-      <select v-model="actionType">
+      <select v-model="actionType" @change="onActionChange">
         <option v-for="item in ACTION_TYPES" :key="item" :value="item">{{ item }}</option>
       </select>
     </label>
@@ -156,6 +176,7 @@ function removeEntry(list: "next" | "error", index: number) {
       </li>
     </ul>
     <textarea v-model="actionParam" rows="4" spellcheck="false" />
+    <p class="example">推荐默认值：<code>{{ defaultParam("action", actionType) }}</code></p>
 
     <div class="grid">
       <label>timeout<input v-model.number="timeout" type="number" /></label>
@@ -310,5 +331,16 @@ legend {
 .error {
   color: #dc2626;
   font-size: 12px;
+}
+.example {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: #9ca3af;
+  word-break: break-all;
+}
+.example code {
+  background: #f3f4f6;
+  padding: 1px 4px;
+  border-radius: 4px;
 }
 </style>

@@ -122,10 +122,17 @@ export const ACTION_HELP: Record<string, HelpEntry> = {
     effect: "点击本次识别命中的位置。",
     scene: "点击按钮、选项等（最常用）",
     params: [
-      { name: "target", desc: "点击目标，默认作用于识别命中区域，也可指定坐标" },
-      { name: "target_offset", desc: "在目标基础上的偏移 [x, y, w, h]" },
+      {
+        name: "target",
+        desc:
+          "点击目标：省略 / \"Self\"=识别命中处；[x,y]=固定坐标；[x,y,w,h]=区域；\"PreTask\"=上一节点命中处",
+      },
+      { name: "target_offset", desc: "在 target 基础上的偏移矩形 [x, y, w, h]" },
     ],
-    tips: ["默认点击识别命中框，无需手写坐标，因此具备抗变性"],
+    tips: [
+      "默认点击识别命中框，无需手写坐标，因此具备抗变性",
+      "填写示例：留空 {} 即点命中处；{\"target\":[100,200]} 点固定坐标；{\"target_offset\":[5,5,10,10]} 微调",
+    ],
   },
   LongPress: {
     effect: "长按识别命中的位置。",
@@ -213,7 +220,95 @@ export const ACTION_HELP: Record<string, HelpEntry> = {
     scene: "内置动作无法满足的特殊操作",
     params: [{ name: "custom_action", desc: "自定义动作名称" }],
   },
+  TouchDown: {
+    effect: "按下屏幕（不抬起），用于组合复杂手势。",
+    scene: "需要精确控制按下/移动/抬起的拖拽",
+    params: [
+      { name: "contact", desc: "触点编号（多指时区分不同手指），从 0 开始" },
+      {
+        name: "target",
+        desc: "同上：省略 / \"Self\"=命中处；[x,y]=坐标；[x,y,w,h]=区域",
+      },
+      { name: "target_offset", desc: "偏移矩形 [x, y, w, h]" },
+    ],
+  },
+  TouchMove: {
+    effect: "移动已按下的触点。",
+    scene: "拖拽过程的中间移动",
+    params: [
+      { name: "contact", desc: "触点编号" },
+      { name: "target", desc: "目标位置，同 Click" },
+      { name: "target_offset", desc: "偏移矩形 [x, y, w, h]" },
+    ],
+  },
+  TouchUp: {
+    effect: "抬起指定触点，结束一次触摸。",
+    scene: "拖拽结束",
+    params: [{ name: "contact", desc: "触点编号" }],
+  },
+  LongPressKey: {
+    effect: "长按一个按键。",
+    scene: "需要长按触发的快捷键",
+    params: [
+      { name: "key", desc: "键码（Adb 用 Android keycode，Win32 用虚拟键码 VK）" },
+      { name: "duration", desc: "长按时长（毫秒），默认 1000" },
+    ],
+  },
+  KeyDown: {
+    effect: "仅按下按键（不抬起）。",
+    scene: "组合键中的修饰键",
+    params: [{ name: "key", desc: "键码" }],
+  },
+  KeyUp: {
+    effect: "仅抬起按键。",
+    scene: "配合 KeyDown 完成组合键",
+    params: [{ name: "key", desc: "键码" }],
+  },
 };
+
+/** 各识别/动作在选中时的推荐默认参数（JSON 字符串），用于输入框预填「尚可的默认值」 */
+export const RECOGNITION_DEFAULT: Record<string, string> = {
+  DirectHit: "{}",
+  TemplateMatch: '{\n  "template": "your_template.png",\n  "threshold": 0.8\n}',
+  FeatureMatch: '{\n  "template": "your_template.png"\n}',
+  ColorMatch: '{\n  "lower": [0, 0, 0],\n  "upper": [255, 255, 255]\n}',
+  OCR: '{\n  "expected": "^开始$"\n}',
+  NeuralNetworkClassify: '{\n  "model": "model.onnx",\n  "labels": ["label1"]\n}',
+  NeuralNetworkDetect: '{\n  "model": "model.onnx",\n  "labels": ["label1"]\n}',
+  And: '{\n  "all_of": []\n}',
+  Or: '{\n  "any_of": []\n}',
+  Custom: '{\n  "custom_recognition": "name"\n}',
+};
+
+export const ACTION_DEFAULT: Record<string, string> = {
+  DoNothing: "{}",
+  Click: "{}",
+  LongPress: '{\n  "duration": 1000\n}',
+  Swipe: '{\n  "begin": [0, 0],\n  "end": [0, 0]\n}',
+  MultiSwipe: '{\n  "swipes": []\n}',
+  TouchDown: '{\n  "contact": 0,\n  "target": [0, 0]\n}',
+  TouchMove: '{\n  "contact": 0,\n  "target": [0, 0]\n}',
+  TouchUp: '{\n  "contact": 0\n}',
+  Scroll: '{\n  "dx": 0,\n  "dy": -120\n}',
+  ClickKey: '{\n  "key": 13\n}',
+  LongPressKey: '{\n  "key": 13\n}',
+  KeyDown: '{\n  "key": 13\n}',
+  KeyUp: '{\n  "key": 13\n}',
+  InputText: '{\n  "input_text": "hello"\n}',
+  StartApp: '{\n  "package": "com.example"\n}',
+  StopApp: '{\n  "package": "com.example"\n}',
+  StopTask: "{}",
+  Command: '{\n  "exec": "cmd.exe"\n}',
+  Shell: '{\n  "cmd": "ls"\n}',
+  Screencap: '{\n  "filename": "shot.png"\n}',
+  Custom: '{\n  "custom_action": "name"\n}',
+};
+
+/** 选中某识别/动作时，若当前参数为空或仅 {}，则预填推荐默认值 */
+export function defaultParam(kind: "recognition" | "action", type: string): string {
+  const table = kind === "recognition" ? RECOGNITION_DEFAULT : ACTION_DEFAULT;
+  return table[type] ?? "{}";
+}
 
 /** 节点级公共字段的指引 */
 export const NODE_FIELD_HELP: ParamHelp[] = [
