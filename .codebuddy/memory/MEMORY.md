@@ -7,6 +7,8 @@
 - 技术栈：Rust + Tauri 2 + Vue3 + Vue Flow + 官方绑定 `maa-framework-rs`（crate `maa-framework`，feature `dynamic`，`load_library` 加载预编译库）。
 - 后端模块：`maa/`(M0运行时)、`pipeline/`(PipelineDocument+V1/V2)、`recorder/`(inputbot采集+智能模板)、`capture/`(scrap截屏+ROI)、`device/`(Win32窗口列举)、`ai/`(环境探测)、`commands.rs`(命令层)。
 - 前端：`App.vue` 三标签页(运行/图编辑器/录制)，ControllerPanel 已并入运行页。运行页含加载库/资源、连接(窗口或ADB)、状态每1.5s刷新、入口下拉+运行/停止、查看窗口画面(控制器截图)、识别回显(绿框，随 `maa://event` 回传节点名/命中/框[4]/命中风截图)。图编辑器：`graph.ts`映射层 + PipelineNodeView/JumpBackNodeView/GraphEditor + RoiCapture(抓模板) + NodeInspector。AI 页已从导航移除(代码保留可恢复)。
+  - **设备状态跨 tab 持久化**：`src/components/deviceStore.ts` 用模块级 `ref` 持有 windows/devices/selectedWindow/selectedDevice，避免切 tab 卸载运行页后列表清空。连接成功后列表只显示已连那一项（滚动条缩短），点「切换窗口/设备」可临时展开全部。
+  - **指令集与默认值**：`help/registry.ts` 的 RECOGNITION_HELP/ACTION_HELP 已对齐 MaaFramework 官方协议（参考 `kqcoxn/MaaPipelineEditor` 的 `.agents/skills/maafw/references/3.1-任务流水线协议.md`）。识别 10 种、动作含 TouchDown/TouchUp/TouchMove/LongPressKey/KeyDown/KeyUp 全量；`RECOGNITION_DEFAULT/ACTION_DEFAULT` 给各类型推荐默认参数，NodeInspector 切换类型且参数为空时自动预填。Click 的 target：省略/"Self"=命中处、[x,y]=坐标、[x,y,w,h]=区域、"PreTask"=上一节点命中。
 - 质量门禁：`make lint`=markdownlint-cli2(忽略maa-sdk/)+vue-tsc --noEmit+cargo clippy 全绿；`make test`=cargo test(44)+vitest(63) 共107全绿。前端 vitest+jsdom，Vue Flow 用替身文本断言；`src/test/setup.ts` 补 ResizeObserver。
 - 规划文档：`docs/开发规划.md`；验收：`docs/验收清单.md`。
 
