@@ -1,0 +1,391 @@
+import {
+  type MessageHandler,
+  type APIRoute,
+  type HandshakeResponse,
+  SystemRoutes,
+} from "./type.ts";
+import { message, notification, Button } from "antd";
+import { createElement } from "react";
+import { FileProtocol } from "./protocols/FileProtocol";
+import { MFWProtocol } from "./protocols/MFWProtocol";
+import { ErrorProtocol } from "./protocols/ErrorProtocol";
+import { ConfigProtocol } from "./protocols/ConfigProtocol";
+import { DebugProtocolClient } from "./protocols/DebugProtocolClient";
+import { ResourceProtocol } from "./protocols/ResourceProtocol";
+import { LoggerProtocol } from "./protocols/LoggerProtocol";
+import { AIProtocol } from "./protocols/AIProtocol";
+import { InterfaceProtocol } from "./protocols/InterfaceProtocol";
+import { globalConfig } from "@/stores/app/configStore";
+import { registerDebugProtocolListeners } from "../features/debug/protocols/registerProtocolListeners";
+import { openExternalUrl } from "../features/embed/navigation/externalNavigation";
+
+const PROTOCOL_VERSION = globalConfig.protocolVersion;
+
+export class LocalWebSocketServer {
+  private ws: WebSocket | null = null;
+  private url: string;
+  private routes: Map<string, MessageHandler> = new Map();
+  private statusListeners = new Set<(connected: boolean) => void>();
+  private connectingListeners = new Set<(isConnecting: boolean) => void>();
+  private connectTimeout: number | null = null;
+  private isConnecting: boolean = false;
+  private handshakeCompleted: boolean = false;
+  private readonly CONNECTION_TIMEOUT = 3000;
+
+  constructor(port: number = 9066) {
+    this.url = `ws://127.0.0.1:${port}`;
+    // 注册系统级路由
+    this.registerSystemRoutes();
+  }
+
+  // 注册系统级路由
+  private registerSystemRoutes() {
+    // 握手响应处理
+    this.routes.set(
+      SystemRoutes.HANDSHAKE_RESPONSE,
+      (data: HandshakeResponse) => {
+        if (data.success) {
+          this.handshakeCompleted = true;
+          this.clearConnectTimeout();
+          this.isConnecting = false;
+          this.emitConnecting(false);
+          message.success(`已连接到本地服务`);
+          this.emitStatus(true);
+        } else {
+          console.error(
+            "[WebSocket] 协议版本不匹配，前端需求:",
+            PROTOCOL_VERSION,
+            "，当前本地服务协议:",
+            data.required_version,
+          );
+          message.error(
+            `协议版本不匹配，前端需求: ${PROTOCOL_VERSION}，当前本地服务协议: ${data.required_version}，请按后端提示更新`,
+          );
+          // 主动断开连接
+          this.disconnect();
+        }
+      },
+    );
+  }
+
+  // 设置端口
+  setPort(port: number) {
+    // 如果有正在进行的连接则先断开
+    if (this.ws !== null) {
+      this.disconnect();
+    }
+    this.url = `ws://127.0.0.1:${port}`;
+  }
+
+  // 注册连接状态变化回调
+  onStatus(callback: (connected: boolean) => void) {
+    this.statusListeners.add(callback);
+    return () => this.statusListeners.delete(callback);
+  }
+
+  // 注册连接中状态变化回调
+  onConnecting(callback: (isConnecting: boolean) => void) {
+    this.connectingListeners.add(callback);
+    return () => this.connectingListeners.delete(callback);
+  }
+
+  /**
+   * 注册 API 路由
+   * @example
+   * server.registerRoute('/api/hello', (data, ws) => {
+   *   server.send('/api/response', { message: 'Hello back!' });
+   * });
+   */
+  registerRoute(path: string, handler: MessageHandler) {
+    this.routes.set(path, handler);
+  }
+
+  // 批量注册路由
+  registerRoutes(routes: APIRoute[]) {
+    routes.forEach(({ path, handler }) => {
+      this.registerRoute(path, handler);
+    });
+  }
+
+  // 连接到 WebSocket 服务器
+  connect() {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      console.warn("[WebSocket] Already connected");
+      return;
+    }
+
+    // 防止重复连接
+    if (this.isConnecting) {
+      console.warn("[WebSocket] Connection already in progress");
+      message.warning("正在尝试连接本地服务中，请稍候...");
+      return;
+    }
+
+    // 清除之前的超时定时器
+    this.clearConnectTimeout();
+    this.isConnecting = true;
+    this.emitConnecting(true);
+
+    try {
+      this.ws = new WebSocket(this.url);
+
+      // 设置连接超时
+      this.connectTimeout = window.setTimeout(() => {
+        if (this.ws && this.ws.readyState !== WebSocket.OPEN) {
+          console.error("[WebSocket] Connection timeout");
+          const key = `connection-error-${Date.now()}`;
+          notification.error({
+            key,
+            title: "连接超时",
+            description: "请检查本地服务是否已启动或端口是否可用",
+            placement: "topRight",
+            duration: 5,
+            actions: createElement(
+              Button,
+              {
+                type: "primary",
+                size: "small",
+                onClick: () => {
+                  openExternalUrl(
+                    "https://mpe.codax.site/docs/guide/server/deploy.html",
+                  );
+                  notification.destroy(key);
+                },
+              },
+              "查看文档",
+            ),
+          });
+          this.ws.close();
+          this.ws = null;
+          this.isConnecting = false;
+          this.emitConnecting(false);
+          this.emitStatus(false);
+        }
+      }, this.CONNECTION_TIMEOUT);
+
+      this.ws.onopen = () => {
+        // 发送版本握手请求
+        this.sendHandshake();
+      };
+
+      this.ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          const { path, data } = message;
+
+          if (path && this.routes.has(path)) {
+            const handler = this.routes.get(path)!;
+            handler(data, this.ws!);
+          } else {
+            console.warn("[WebSocket] No handler for path:", path);
+          }
+        } catch (error) {
+          console.error("[WebSocket] Failed to parse message:", error);
+        }
+      };
+
+      this.ws.onerror = (error) => {
+        console.error("[WebSocket] Error:", error);
+        this.clearConnectTimeout();
+        this.isConnecting = false;
+        this.emitConnecting(false);
+        const key = `connection-error-${Date.now()}`;
+        notification.error({
+          key,
+          title: "连接失败",
+          description: "请检查本地服务是否已启动或端口是否可用",
+          placement: "topRight",
+          duration: 5,
+          actions: createElement(
+            Button,
+            {
+              type: "primary",
+              size: "small",
+              onClick: () => {
+                openExternalUrl(
+                  "https://mpe.codax.site/docs/guide/server/deploy.html",
+                );
+                notification.destroy(key);
+              },
+            },
+            "查看文档",
+          ),
+        });
+      };
+
+      this.ws.onclose = () => {
+        this.clearConnectTimeout();
+        this.isConnecting = false;
+        this.emitConnecting(false);
+        message.info("本地服务已断开连接");
+        this.emitStatus(false);
+        this.ws = null;
+      };
+    } catch (error) {
+      console.error("[WebSocket] Connection failed:", error);
+      this.clearConnectTimeout();
+      this.isConnecting = false;
+      this.emitConnecting(false);
+      const key = `connection-error-${Date.now()}`;
+      const errorMsg = error instanceof Error ? error.message : "未知错误";
+      notification.error({
+        key,
+        title: "本地服务连接失败",
+        description: errorMsg,
+        placement: "topRight",
+        duration: 5,
+        actions: createElement(
+          Button,
+          {
+            type: "primary",
+            size: "small",
+            onClick: () => {
+              openExternalUrl(
+                "https://mpe.codax.site/docs/guide/server/deploy.html",
+              );
+              notification.destroy(key);
+            },
+          },
+          "查看文档",
+        ),
+      });
+      this.emitStatus(false);
+    }
+  }
+
+  // 断开连接
+  disconnect() {
+    this.clearConnectTimeout();
+    this.isConnecting = false;
+    this.handshakeCompleted = false;
+    this.emitConnecting(false);
+
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+
+    this.emitStatus(false);
+  }
+
+  // 发送版本握手请求
+  private sendHandshake() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.error("[WebSocket] Cannot send handshake, not connected");
+      return;
+    }
+
+    const handshakeData = {
+      path: SystemRoutes.HANDSHAKE,
+      data: {
+        protocol_version: PROTOCOL_VERSION,
+      },
+    };
+
+    this.ws.send(JSON.stringify(handshakeData));
+  }
+
+  // 发送消息
+  send(path: string, data: unknown) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.warn("[WebSocket] Not connected, cannot send message");
+      return false;
+    }
+
+    try {
+      const message = JSON.stringify({ path, data });
+      this.ws.send(message);
+      return true;
+    } catch (error) {
+      console.error("[WebSocket] Failed to send message:", error);
+      return false;
+    }
+  }
+
+  // 获取连接状态
+  isConnected(): boolean {
+    return (
+      this.ws !== null &&
+      this.ws.readyState === WebSocket.OPEN &&
+      this.handshakeCompleted
+    );
+  }
+
+  // 是否正在连接中
+  getIsConnecting(): boolean {
+    return this.isConnecting;
+  }
+
+  // 清除连接超时定时器
+  private clearConnectTimeout() {
+    if (this.connectTimeout !== null) {
+      clearTimeout(this.connectTimeout);
+      this.connectTimeout = null;
+    }
+  }
+
+  // 清理资源
+  destroy() {
+    this.disconnect();
+    this.routes.clear();
+    this.statusListeners.clear();
+    this.connectingListeners.clear();
+  }
+
+  private emitStatus(connected: boolean) {
+    this.statusListeners.forEach((listener) => listener(connected));
+  }
+
+  private emitConnecting(isConnecting: boolean) {
+    this.connectingListeners.forEach((listener) => listener(isConnecting));
+  }
+}
+
+export const localServer = new LocalWebSocketServer();
+// 保留底层 AI 请求协议，业务层入口已移除。
+export const aiProtocol = new AIProtocol();
+
+// 创建全局协议实例
+export const fileProtocol = new FileProtocol();
+export const mfwProtocol = new MFWProtocol();
+export const errorProtocol = new ErrorProtocol();
+export const configProtocol = new ConfigProtocol();
+export const debugProtocolClient = new DebugProtocolClient();
+export const resourceProtocol = new ResourceProtocol();
+export const loggerProtocol = new LoggerProtocol();
+export const interfaceProtocol = new InterfaceProtocol();
+
+/**
+ * 初始化 WebSocket 连接和所有响应路由
+ * 应在应用启动时调用一次
+ */
+export function initializeWebSocket() {
+  // 注册 ErrorProtocol
+  errorProtocol.register(localServer);
+
+  // 注册 FileProtocol
+  fileProtocol.register(localServer);
+
+  // 注册 MFWProtocol
+  mfwProtocol.register(localServer);
+
+  // 注册 ConfigProtocol
+  configProtocol.register(localServer);
+
+  interfaceProtocol.register(localServer);
+
+  // 注册 debug-vNext 协议客户端
+  debugProtocolClient.register(localServer);
+  registerDebugProtocolListeners(debugProtocolClient);
+
+  // 注册 ResourceProtocol
+  resourceProtocol.register(localServer);
+
+  // 注册 LoggerProtocol
+  loggerProtocol.register(localServer);
+
+  // 注册 AI 代理协议。业务功能可以暂时没有入口，但协议层保持可复用。
+  aiProtocol.register(localServer);
+
+
+}

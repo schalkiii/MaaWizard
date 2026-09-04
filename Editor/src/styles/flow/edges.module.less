@@ -1,0 +1,107 @@
+@import "./flow.less";
+
+@jumpback-color: #f97316;
+
+.edge {
+  stroke: @norm-color;
+  stroke-width: 3;
+  stroke-dasharray: 30, 5;
+  --xy-edge-stroke-selected-default: #ff0000;
+  @trans: 0.2s ease;
+  transition: stroke @trans, stroke-width @trans;
+}
+
+.edge-animated {
+  animation: dash-animation 1s linear infinite;
+  animation-play-state: var(--mpe-canvas-animation-play-state, running);
+}
+
+@keyframes dash-animation {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -35;
+  }
+}
+
+.edge-next {
+  stroke: @next-color;
+}
+
+.edge-error {
+  stroke: @error-color;
+}
+
+.edge-jumpback {
+  stroke: @jumpback-color;
+}
+
+.edge-error-jumpback {
+  stroke: #a855f7;
+}
+
+.edge-selected {
+  stroke-width: 4;
+}
+
+.label {
+  position: absolute;
+  background-color: rgba(white, 0.8);
+  border: 1px solid rgba(black, 0.1);
+  border-radius: 4px;
+  padding: 0px 4px;
+  box-sizing: border-box;
+  z-index: 11;
+  @trans: 0.2s ease;
+  transition: background-color @trans, border-color @trans, font-size @trans,
+    opacity @trans;
+}
+
+.label-selected {
+  background-color: rgba(white, 1);
+  border: 1px solid rgba(black, 0.6);
+  font-size: 16px;
+}
+
+// 可拖拽的控制点
+.control-point {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background-color: rgba(white, 0.9);
+  border: 2px solid @norm-color;
+  border-radius: 50%;
+  cursor: grab;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  pointer-events: all;
+  z-index: 10;
+
+  &:hover {
+    opacity: 1;
+    background-color: white;
+  }
+}
+
+.control-point-dragging {
+  opacity: 1;
+  cursor: grabbing;
+  background-color: @next-color;
+  border-color: @next-color;
+}
+
+.control-point-offset {
+  background-color: #fef3c7;
+  border-color: #f59e0b;
+
+  &:hover {
+    background-color: #fde68a;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .edge-animated {
+    animation: none;
+  }
+}

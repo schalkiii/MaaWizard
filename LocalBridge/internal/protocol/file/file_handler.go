@@ -1,0 +1,417 @@
+package file
+
+import (
+	"encoding/json"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+
+	"github.com/kqcoxn/MaaPipelineEditor/LocalBridge/internal/errors"
+	"github.com/kqcoxn/MaaPipelineEditor/LocalBridge/internal/eventbus"
+	"github.com/kqcoxn/MaaPipelineEditor/LocalBridge/internal/logger"
+	"github.com/kqcoxn/MaaPipelineEditor/LocalBridge/internal/server"
+	fileService "github.com/kqcoxn/MaaPipelineEditor/LocalBridge/internal/service/file"
+	"github.com/kqcoxn/MaaPipelineEditor/LocalBridge/pkg/models"
+)
+
+// 文件协议处理器
+type Handler struct {
+	fileService *fileService.Service
+	eventBus    *eventbus.EventBus
+	wsServer    *server.WebSocketServer
+	root        string
+}
+
+// 创建文件协议处理器
+func NewHandler(fileService *fileService.Service, eventBus *eventbus.EventBus, wsServer *server.WebSocketServer, root string) *Handler {
+	h := &Handler{
+		fileService: fileService,
+		eventBus:    eventBus,
+		wsServer:    wsServer,
+		root:        root,
+	}
+
+	// 订阅事件
+	h.subscribeEvents()
+
+	return h
+}
+
+// 返回处理的路由前缀
+func (h *Handler) GetRoutePrefix() []string {
+	return []string{
+		"/etl/open_file",
+		"/etl/open_external",
+		"/etl/save_file",
+		"/etl/save_separated",
+		"/etl/create_file",
+		"/etl/refresh_file_list",
+	}
+}
+
+// 处理消息
+func (h *Handler) Handle(msg models.Message, conn *server.Connection) *models.Message {
+	switch msg.Path {
+	case "/etl/open_file":
+		return h.handleOpenFile(msg, conn)
+	case "/etl/open_external":
+		return h.handleOpenExternal(msg, conn)
+	case "/etl/save_file":
+		return h.handleSaveFile(msg, conn)
+	case "/etl/save_separated":
+		return h.handleSaveSeparated(msg, conn)
+	case "/etl/create_file":
+		return h.handleCreateFile(msg, conn)
+	case "/etl/refresh_file_list":
+		return h.handleRefreshFileList(msg, conn)
+	default:
+		return nil
+	}
+}
+
+// 使用操作系统默认程序打开 JSON/JSONC 文件。
+func (h *Handler) handleOpenExternal(msg models.Message, conn *server.Connection) *models.Message {
+	var req models.OpenExternalFileRequest
+	if err := h.parseData(msg.Data, &req); err != nil {
+		h.sendError(conn, err)
+		return nil
+	}
+
+	ext := strings.ToLower(filepath.Ext(req.FilePath))
+	if ext != ".json" && ext != ".jsonc" {
+		h.sendError(conn, errors.Wrap(errors.ErrPermissionDenied, "仅支持打开 JSON/JSONC 文件", nil))
+		return nil
+	}
+	if err := h.fileService.ValidateFilePath(req.FilePath); err != nil {
+		if lbErr, ok := err.(*errors.LBError); ok {
+			h.sendError(conn, lbErr)
+		} else {
+			h.sendError(conn, errors.Wrap(errors.ErrFileReadError, "文件不存在", err))
+		}
+		return nil
+	}
+
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", "", req.FilePath)
+	case "darwin":
+		cmd = exec.Command("open", req.FilePath)
+	default:
+		cmd = exec.Command("xdg-open", req.FilePath)
+	}
+	if err := cmd.Start(); err != nil {
+		conn.Send(models.Message{Path: "/ack/open_external", Data: map[string]interface{}{
+			"status": "error", "file_path": req.FilePath, "message": "打开本地文件失败: " + err.Error(),
+		}})
+		return nil
+	}
+	return &models.Message{Path: "/ack/open_external", Data: map[string]interface{}{
+		"status": "ok", "file_path": req.FilePath,
+	}}
+}
+
+// 处理打开文件请求
+func (h *Handler) handleOpenFile(msg models.Message, conn *server.Connection) *models.Message {
+	// 解析请求
+	var req models.OpenFileRequest
+	if err := h.parseData(msg.Data, &req); err != nil {
+		h.sendError(conn, err)
+		return nil
+	}
+
+	// 读取 Pipeline 文件
+	content, err := h.fileService.ReadFile(req.FilePath)
+	if err != nil {
+		if lbErr, ok := err.(*errors.LBError); ok {
+			h.sendError(conn, lbErr)
+		} else {
+			h.sendError(conn, errors.Wrap(errors.ErrFileReadError, "读取文件失败", err))
+		}
+		return nil
+	}
+
+	// 生成配置文件路径
+	var configPath string
+	var mpeConfig interface{}
+
+	// 从完整路径中提取目录和文件名
+	lastSlashIndex := -1
+	for i := len(req.FilePath) - 1; i >= 0; i-- {
+		if req.FilePath[i] == '/' || req.FilePath[i] == '\\' {
+			lastSlashIndex = i
+			break
+		}
+	}
+
+	if lastSlashIndex >= 0 {
+		directory := req.FilePath[:lastSlashIndex+1]
+		fileName := req.FilePath[lastSlashIndex+1:]
+
+		// 移除扩展名
+		baseName := fileName
+		if len(fileName) > 5 && (fileName[len(fileName)-5:] == ".json" || fileName[len(fileName)-6:] == ".jsonc") {
+			if fileName[len(fileName)-5:] == ".json" {
+				baseName = fileName[:len(fileName)-5]
+			} else {
+				baseName = fileName[:len(fileName)-6]
+			}
+		}
+
+		configPath = directory + "." + baseName + ".mpe.json"
+
+		// 尝试读取配置文件
+		configContent, err := h.fileService.ReadFile(configPath)
+		if err == nil {
+			// 配置文件存在
+			mpeConfig = configContent
+			logger.Info("FileService", "找到并加载配置文件: %s", configPath)
+		} else {
+			// 配置文件不存在，清空路径
+			configPath = ""
+		}
+	}
+
+	// 返回文件内容
+	return &models.Message{
+		Path: "/lte/file_content",
+		Data: models.FileContentData{
+			FilePath:   req.FilePath,
+			Content:    content,
+			MpeConfig:  mpeConfig,
+			ConfigPath: configPath,
+		},
+	}
+}
+
+// 处理保存文件请求
+func (h *Handler) handleSaveFile(msg models.Message, conn *server.Connection) *models.Message {
+	// 解析请求
+	var req models.SaveFileRequest
+	if err := h.parseData(msg.Data, &req); err != nil {
+		h.sendError(conn, err)
+		return nil
+	}
+
+	// 优先使用 JSON 字符串（保持字段顺序），其次使用 JSON 对象
+	var content interface{}
+	keepOrder := false
+	if req.Content != "" {
+		content = req.Content
+		keepOrder = true
+	} else if req.ContentJSON != nil {
+		content = req.ContentJSON
+	}
+
+	// 保存文件
+	if err := h.fileService.SaveFileWithOrder(req.FilePath, content, req.Indent, keepOrder); err != nil {
+		if lbErr, ok := err.(*errors.LBError); ok {
+			h.sendError(conn, lbErr)
+		} else {
+			h.sendError(conn, errors.Wrap(errors.ErrFileWriteError, "保存文件失败", err))
+		}
+		return nil
+	}
+	h.pushFileList()
+
+	// 返回确认
+	return &models.Message{
+		Path: "/ack/save_file",
+		Data: models.SaveFileAckData{
+			FilePath: req.FilePath,
+			Status:   "ok",
+		},
+	}
+}
+
+// 处理分离保存文件请求
+func (h *Handler) handleSaveSeparated(msg models.Message, conn *server.Connection) *models.Message {
+	// 解析请求
+	var req models.SaveSeparatedRequest
+	if err := h.parseData(msg.Data, &req); err != nil {
+		h.sendError(conn, err)
+		return nil
+	}
+
+	// 优先使用 JSON 字符串（保持字段顺序），其次使用 JSON 对象
+	var pipelineContent interface{}
+	var configContent interface{}
+	keepPipelineOrder := false
+	keepConfigOrder := false
+
+	if req.Pipeline != "" {
+		pipelineContent = req.Pipeline
+		keepPipelineOrder = true
+	} else if req.PipelineJSON != nil {
+		pipelineContent = req.PipelineJSON
+	}
+
+	if req.Config != "" {
+		configContent = req.Config
+		keepConfigOrder = true
+	} else if req.ConfigJSON != nil {
+		configContent = req.ConfigJSON
+	}
+
+	// 保存 Pipeline 文件
+	if err := h.fileService.SaveFileWithOrder(req.PipelinePath, pipelineContent, req.Indent, keepPipelineOrder); err != nil {
+		if lbErr, ok := err.(*errors.LBError); ok {
+			h.sendError(conn, lbErr)
+		} else {
+			h.sendError(conn, errors.Wrap(errors.ErrFileWriteError, "保存 Pipeline 文件失败", err))
+		}
+		return nil
+	}
+
+	// 保存配置文件
+	if err := h.fileService.SaveFileWithOrder(req.ConfigPath, configContent, req.Indent, keepConfigOrder); err != nil {
+		if lbErr, ok := err.(*errors.LBError); ok {
+			h.sendError(conn, lbErr)
+		} else {
+			h.sendError(conn, errors.Wrap(errors.ErrFileWriteError, "保存配置文件失败", err))
+		}
+		return nil
+	}
+
+	logger.Debug("FileService", "分离模式保存成功: %s + %s", req.PipelinePath, req.ConfigPath)
+	h.pushFileList()
+
+	// 返回确认
+	return &models.Message{
+		Path: "/ack/save_separated",
+		Data: models.SaveSeparatedAckData{
+			PipelinePath: req.PipelinePath,
+			ConfigPath:   req.ConfigPath,
+			Status:       "ok",
+		},
+	}
+}
+
+// 处理创建文件请求
+func (h *Handler) handleCreateFile(msg models.Message, conn *server.Connection) *models.Message {
+	// 解析请求
+	var req models.CreateFileRequest
+	if err := h.parseData(msg.Data, &req); err != nil {
+		h.sendError(conn, err)
+		return nil
+	}
+
+	// 创建文件
+	filePath, err := h.fileService.CreateFile(req.Directory, req.FileName, req.Content)
+	if err != nil {
+		if lbErr, ok := err.(*errors.LBError); ok {
+			h.sendError(conn, lbErr)
+		} else {
+			h.sendError(conn, errors.Wrap(errors.ErrFileWriteError, "创建文件失败", err))
+		}
+		return nil
+	}
+
+	// 重新推送文件列表
+	h.pushFileList()
+
+	// 返回确认
+	return &models.Message{
+		Path: "/ack/create_file",
+		Data: models.CreateFileAckData{
+			FilePath: filePath,
+			Status:   "ok",
+		},
+	}
+}
+
+// 处理刷新文件列表请求
+func (h *Handler) handleRefreshFileList(msg models.Message, conn *server.Connection) *models.Message {
+	// 重新扫描文件系统，而非仅推送内存索引
+	if err := h.fileService.Rescan(); err != nil {
+		logger.Error("FileProtocol", "重新扫描文件失败: %v", err)
+	}
+	h.pushFileList()
+	return nil
+}
+
+// 订阅事件
+func (h *Handler) subscribeEvents() {
+	// 订阅连接建立事件
+	h.eventBus.Subscribe(eventbus.EventConnectionEstablished, func(event eventbus.Event) {
+		// 推送文件列表
+		h.pushFileList()
+	})
+	h.eventBus.Subscribe(eventbus.EventFileListChanged, func(event eventbus.Event) {
+		h.pushFileList()
+	})
+
+	// 订阅文件变化事件
+	h.eventBus.Subscribe(eventbus.EventFileChanged, func(event eventbus.Event) {
+		if data, ok := event.Data.(map[string]interface{}); ok {
+			changeType, _ := data["type"].(string)
+			filePath, _ := data["file_path"].(string)
+			isDirectory, _ := data["is_directory"].(bool)
+
+			// 推送变化通知
+			h.wsServer.Broadcast(models.Message{
+				Path: "/lte/file_changed",
+				Data: models.FileChangedData{
+					Type:        changeType,
+					FilePath:    filePath,
+					IsDirectory: isDirectory,
+				},
+			})
+
+			logger.Debug("FileProtocol", "推送文件变化通知: %s - %s (isDir: %v)", changeType, filePath, isDirectory)
+
+			// 对于文件结构变化，推送更新后的文件列表
+			// created: 新文件/目录加入
+			// deleted (目录): 多个文件被移除
+			// renamed: 路径变更
+			if changeType == "created" || changeType == "modified" || (changeType == "deleted" && isDirectory) || changeType == "renamed" {
+				h.pushFileList()
+			}
+		}
+	})
+}
+
+// 推送文件列表
+func (h *Handler) pushFileList() {
+	fileList := h.fileService.GetFileList()
+	directories := h.fileService.GetDirectories()
+
+	h.wsServer.Broadcast(models.Message{
+		Path: "/lte/file_list",
+		Data: models.FileListData{
+			Root:        h.root,
+			Files:       fileList,
+			Directories: directories,
+		},
+	})
+
+	logger.Debug("FileProtocol", "推送文件列表，共 %d 个文件, %d 个目录", len(fileList), len(directories))
+}
+
+// 解析消息数据
+func (h *Handler) parseData(data interface{}, target interface{}) *errors.LBError {
+	// 将 data 转为 JSON
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return errors.NewInvalidJSONError(err)
+	}
+
+	if err := json.Unmarshal(jsonData, target); err != nil {
+		return errors.NewInvalidJSONError(err)
+	}
+
+	return nil
+}
+
+// 发送错误消息
+func (h *Handler) sendError(conn *server.Connection, err *errors.LBError) {
+	logger.Error("FileProtocol", "%s", err.Error())
+
+	errorMsg := models.Message{
+		Path: "/error",
+		Data: err.ToErrorData(),
+	}
+
+	conn.Send(errorMsg)
+}

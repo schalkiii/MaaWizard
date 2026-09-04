@@ -1,0 +1,206 @@
+@import "../base/iconfonts.less";
+@import "../base/global.less";
+
+.panel {
+  width: 380px;
+  min-height: 120px;
+  border-radius: 6px;
+  right: 10px;
+  top: 130px;
+  overflow: hidden;
+
+  .spin {
+    width: 100%;
+    height: 110px;
+  }
+
+  .tools {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+
+    > * {
+      transition: transform 0.2s ease;
+
+      &:hover {
+        transform: scale(1.1);
+      }
+    }
+  }
+
+  .list {
+    .item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-radius: 4px;
+      box-sizing: border-box;
+      padding: 4px;
+
+      .key {
+        .ellipsis();
+        width: 98px;
+        text-align: right;
+        font-size: 18px;
+      }
+
+      .head-key {
+        font-weight: 700;
+      }
+
+      .value {
+        margin-left: 12px;
+        flex: 1;
+      }
+
+      .list-value {
+        .value();
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+
+        > div {
+          width: 100%;
+          display: flex;
+          align-items: center;
+        }
+
+        .icons-container {
+          display: flex;
+          align-items: center;
+          flex-shrink: 0;
+          transition: width 0.2s ease;
+        }
+
+        .operation {
+          width: 26px;
+          height: 100%;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+        }
+      }
+
+      .operation {
+        margin-left: 8px;
+        width: 24px;
+        height: 100%;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+
+      .line {
+        font-weight: bold;
+        text-align: center;
+      }
+    }
+  }
+}
+
+.tabs {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tabsBody {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tabScrollContent {
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+
+  &::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background-color: rgba(0, 0, 0, 0.25);
+    border-radius: 4px;
+  }
+}
+
+.param-list {
+  max-height: 400px;
+  overflow-y: auto;
+
+  .param {
+    box-sizing: border-box;
+    padding: 0 8px;
+    font-size: 16px;
+    height: 32px;
+    line-height: 32px;
+    width: 100%;
+    text-align: center;
+    border-radius: 6px;
+    transition: all 0.2s ease;
+
+    &:hover {
+      background-color: rgba(gray, 0.1);
+    }
+  }
+}
+
+// 图片选择列表样式
+.listContainer {
+  flex: 1;
+  margin-left: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+// 图片选择器固定高度样式
+.imageSelect {
+  height: 32px !important;
+
+  :global(.ant-select-selector) {
+    height: 32px !important;
+    min-height: 32px !important;
+    max-height: 32px !important;
+    padding: 0 11px !important;
+
+    input {
+      height: 30px !important;
+    }
+  }
+}
+
+.listItem {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+
+  > :first-child {
+    flex: 1;
+  }
+
+  .operation {
+    margin-left: 0;
+  }
+}
+
+.addListItem {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  font-size: 12px;
+  color: #666;
+
+  &:hover {
+    background-color: rgba(0, 0, 0, 0.04);
+    color: #83be42;
+  }
+}

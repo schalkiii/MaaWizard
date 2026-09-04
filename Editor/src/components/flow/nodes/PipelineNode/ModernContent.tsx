@@ -1,0 +1,302 @@
+import { memo, useMemo, useRef } from "react";
+import { type NodeProps } from "@xyflow/react";
+import classNames from "classnames";
+
+import style from "../../../../styles/flow/nodes.module.less";
+import type { PipelineNodeDataType } from "../../../../stores/flow";
+import { useConfigStore } from "@/stores/app/configStore";
+import IconFont from "../../../iconfonts";
+import { KVElem } from "../components/KVElem";
+import { PipelineNodeHandles } from "../components/NodeHandles";
+import { NodeTemplateImages } from "../components/NodeTemplateImages";
+import { getRecognitionIcon, getActionIcon, getNodeTypeIcon } from "../utils";
+import { JsonHelper } from "../../../../utils/data/jsonHelper";
+import { otherFieldSchema } from "../../../../core/fields/other/schema";
+import {
+  mergeFieldSortConfig,
+  sortKeysByOrder,
+} from "../../../../core/sorting";
+import { useNodeFlowItems } from "./useNodeFlowItems";
+
+// focus 子项 key 到 displayName 的映射
+const focusDisplayNameMap: Record<string, string> = (() => {
+  const map: Record<string, string> = {};
+  if (otherFieldSchema.focus.params) {
+    for (const param of otherFieldSchema.focus.params) {
+      if (param.displayName) {
+        map[param.key] = param.displayName;
+      }
+    }
+  }
+  return map;
+})();
+
+/**现代风格Pipeline节点内容 */
+export const ModernContent = memo(
+  ({ data, props }: { data: PipelineNodeDataType; props: NodeProps }) => {
+    const nodeId = props.id;
+    const headerRef = useRef<HTMLDivElement>(null);
+
+    // 是否显示节点模板图片
+    const showNodeTemplateImages = useConfigStore(
+      (state) => state.configs.showNodeTemplateImages,
+    );
+    const showNodeFlowSection = useConfigStore(
+      (state) => state.configs.showNodeFlowSection,
+    );
+    // 是否渲染节点详细字段
+    const showNodeDetailFields = useConfigStore(
+      (state) => state.configs.showNodeDetailFields,
+    );
+    const fieldSortConfig = useConfigStore(
+      (state) => state.configs.fieldSortConfig,
+    );
+    const mergedSortConfig = useMemo(
+      () => mergeFieldSortConfig(fieldSortConfig),
+      [fieldSortConfig],
+    );
+
+    const { nextItems, errorItems } = useNodeFlowItems(nodeId);
+
+    const extraEntries = useMemo(() => {
+      if (JsonHelper.isObj(data.extras)) {
+        return Object.entries(data.extras);
+      }
+      const extras = JsonHelper.stringObjToJson(data.extras);
+      return extras ? Object.entries(extras) : [];
+    }, [data.extras]);
+
+    // 过滤空的 focus 字段，并将 focus 对象拆分为子项
+    const { filteredOthers, focusItems } = useMemo(() => {
+      const others = { ...data.others };
+      let focusItems: { key: string; value: any }[] = [];
+
+      if ("focus" in others) {
+        const focus = others.focus;
+        // 空值检测
+        if (
+          focus === "" ||
+          focus === null ||
+          focus === undefined ||
+          (typeof focus === "object" &&
+            focus !== null &&
+            Object.keys(focus).length === 0)
+        ) {
+          delete others.focus;
+        } else if (typeof focus === "object" && focus !== null) {
+          // 使用 displayName 缩写
+          focusItems = Object.keys(focus).map((subKey) => ({
+            key: focusDisplayNameMap[subKey] || subKey,
+            value: focus[subKey],
+          }));
+          delete others.focus;
+        }
+      }
+
+      return { filteredOthers: others, focusItems };
+    }, [data.others]);
+    const recognitionParamKeys = useMemo(
+      () =>
+        sortKeysByOrder(
+          Object.keys(data.recognition.param),
+          mergedSortConfig.recognitionParamFields,
+        ),
+      [data.recognition.param, mergedSortConfig.recognitionParamFields],
+    );
+    const actionParamKeys = useMemo(
+      () =>
+        sortKeysByOrder(
+          Object.keys(data.action.param),
+          mergedSortConfig.actionParamFields,
+        ),
+      [data.action.param, mergedSortConfig.actionParamFields],
+    );
+    const otherParamKeys = useMemo(
+      () =>
+        sortKeysByOrder(
+          Object.keys(filteredOthers),
+          mergedSortConfig.mainTaskFields,
+        ),
+      [filteredOthers, mergedSortConfig.mainTaskFields],
+    );
+
+    const recoIconConfig = useMemo(
+      () => getRecognitionIcon(data.recognition.type),
+      [data.recognition.type],
+    );
+    const actionIconConfig = useMemo(
+      () => getActionIcon(data.action.type),
+      [data.action.type],
+    );
+    const nodeTypeIconConfig = useMemo(() => getNodeTypeIcon("pipeline"), []);
+
+    const hasRecoParams = useMemo(
+      () => Object.keys(data.recognition.param).length > 0,
+      [data.recognition.param],
+    );
+    const hasActionParams = useMemo(
+      () => Object.keys(data.action.param).length > 0,
+      [data.action.param],
+    );
+    const hasOtherParams = useMemo(
+      () =>
+        Object.keys(filteredOthers).length > 0 ||
+        focusItems.length > 0 ||
+        extraEntries.length > 0,
+      [filteredOthers, focusItems, extraEntries],
+    );
+
+    // 提取 template 路径列表
+    const templatePaths = useMemo(() => {
+      const template = data.recognition.param?.template as unknown;
+      if (!template) return [];
+      if (Array.isArray(template)) {
+        return template.filter(
+          (p): p is string => typeof p === "string" && p.trim() !== "",
+        );
+      }
+      if (typeof template === "string" && template.trim() !== "") {
+        return [template];
+      }
+      return [];
+    }, [data.recognition.param]);
+
+    return (
+      <>
+        {/* 顶部区域 */}
+        <div ref={headerRef} className={style.modernHeader}>
+          <div className={style.headerLeft}>
+            <span title="Pipeline节点">
+              <IconFont
+                className={style.typeIcon}
+                name={nodeTypeIconConfig.name}
+                size={nodeTypeIconConfig.size}
+              />
+            </span>
+          </div>
+          <div className={style.headerTitle}>{data.label}</div>
+          <div className={style.headerRight}>
+            <div className={style.moreBtn}>
+              <IconFont name="icon-gengduo" size={14} />
+            </div>
+          </div>
+        </div>
+
+        {/* 字段区域 */}
+        <div className={style.modernContent}>
+          {/* 识别区域 */}
+          <div className={style.section}>
+            <div className={classNames(style.sectionHeader, style.recoHeader)}>
+              {recoIconConfig.name && (
+                <IconFont
+                  name={recoIconConfig.name}
+                  size={recoIconConfig.size}
+                />
+              )}
+              <span>识别 - {data.recognition.type}</span>
+            </div>
+            {showNodeDetailFields && hasRecoParams && (
+              <ul className={style.sectionList}>
+                {recognitionParamKeys.map((key) => (
+                  <KVElem
+                    key={key}
+                    paramKey={key}
+                    value={data.recognition.param[key]}
+                  />
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {/* 动作区域 */}
+          <div className={style.section}>
+            <div
+              className={classNames(style.sectionHeader, style.actionHeader)}
+            >
+              {actionIconConfig.name && (
+                <IconFont
+                  name={actionIconConfig.name}
+                  size={actionIconConfig.size}
+                />
+              )}
+              <span>动作 - {data.action.type}</span>
+            </div>
+            {showNodeDetailFields && hasActionParams && (
+              <ul className={style.sectionList}>
+                {actionParamKeys.map((key) => (
+                  <KVElem
+                    key={key}
+                    paramKey={key}
+                    value={data.action.param[key]}
+                  />
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {/* 其他区域 */}
+          {showNodeDetailFields && hasOtherParams && (
+            <div className={style.section}>
+              <div
+                className={classNames(style.sectionHeader, style.otherHeader)}
+              >
+                <IconFont name="icon-zidingyi" size={12} />
+                <span>其他</span>
+              </div>
+              <ul className={style.sectionList}>
+                {otherParamKeys.map((key) => (
+                  <KVElem
+                    key={key}
+                    paramKey={key}
+                    value={filteredOthers[key]}
+                  />
+                ))}
+                {focusItems.map((item) => (
+                  <KVElem
+                    key={item.key}
+                    paramKey={item.key}
+                    value={item.value}
+                  />
+                ))}
+                {extraEntries.map(([key, value]) => (
+                  <KVElem key={key} paramKey={key} value={value} />
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+
+        {/* 流程连接区域 */}
+        {showNodeFlowSection && (nextItems.length > 0 || errorItems.length > 0) && (
+          <div className={style.flowSection}>
+            {nextItems.length > 0 && (
+              <div className={style.flowRow}>
+                <span className={`${style.flowTag} ${style.flowTagNext}`}>next</span>
+                <span className={style.flowArrow}>→</span>
+                {nextItems.map((item, i) => (
+                  <span key={i} className={`${style.flowTag} ${style.flowTagTarget} ${style[`flowTarget-${item.variant}`]}`}>{item.label}</span>
+                ))}
+              </div>
+            )}
+            {errorItems.length > 0 && (
+              <div className={style.flowRow}>
+                <span className={`${style.flowTag} ${style.flowTagError}`}>on_error</span>
+                <span className={style.flowArrow}>→</span>
+                {errorItems.map((item, i) => (
+                  <span key={i} className={`${style.flowTag} ${style.flowTagTarget} ${style[`flowTarget-${item.variant}`]}`}>{item.label}</span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 模板图片区域 */}
+        {showNodeTemplateImages && templatePaths.length > 0 && (
+          <NodeTemplateImages templatePaths={templatePaths} />
+        )}
+
+        <PipelineNodeHandles direction={data.handleDirection} />
+      </>
+    );
+  },
+);

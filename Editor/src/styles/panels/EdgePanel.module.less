@@ -1,0 +1,97 @@
+@import "../base/iconfonts.less";
+@import "../base/global.less";
+
+.panel {
+  width: 280px;
+  min-height: 80px;
+  max-height: calc(100vh - 220px);
+  border-radius: 6px;
+  right: 10px;
+  top: 130px;
+  overflow-y: auto;
+
+  .list {
+    padding: 0 12px;
+
+    .item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-radius: 4px;
+      box-sizing: border-box;
+      padding: 8px 4px;
+
+      .key {
+        .ellipsis();
+        width: 100px;
+        text-align: center;
+        font-size: 18px;
+        font-weight: 500;
+      }
+
+      .value {
+        margin-left: 12px;
+        flex: 1;
+        display: flex;
+        align-items: center;
+      }
+
+      .desc {
+        font-size: 12px;
+        color: #666;
+        margin-left: 8px;
+      }
+    }
+  }
+}
+
+// 基础信息区域
+.info {
+  padding: 8px 12px;
+
+  .info-item {
+    display: flex;
+    align-items: center;
+    padding: 4px 0;
+    font-size: 14px;
+
+    .label {
+      color: #666;
+      width: 80px;
+      text-align: right;
+      margin-right: 8px;
+    }
+
+    .content {
+      color: #333;
+      flex: 1;
+      .ellipsis();
+    }
+  }
+}
+
+// JumpBack 配置区域
+.jumpback-section {
+  padding: 8px 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+
+  .info-item {
+    display: flex;
+    align-items: center;
+    padding: 4px 0;
+    font-size: 14px;
+
+    .label {
+      color: #666;
+      width: 80px;
+      text-align: right;
+      margin-right: 8px;
+    }
+
+    .content {
+      color: #333;
+      flex: 1;
+      .ellipsis();
+    }
+  }
+}

@@ -1,0 +1,222 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build-localbridge:
+    name: Build LocalBridge for ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    # 跳过测试版本 tag，允许手动触发
+    if: ${{ github.event_name == 'workflow_dispatch' || (!contains(github.ref_name, 'beta') && !contains(github.ref_name, 'test')) }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            name: mpelb-windows-amd64.exe
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            name: mpelb-linux-amd64
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            name: mpelb-darwin-arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache: false
+
+      - name: Build LocalBridge
+        working-directory: LocalBridge
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="test-$(date +%Y%m%d-%H%M%S)"
+          else
+            VERSION=${GITHUB_REF#refs/tags/v}
+          fi
+          go build -ldflags="-s -w -X main.Version=${VERSION}" -o ../build/${{ matrix.name }} ./cmd/lb
+        shell: bash
+
+      - name: Upload LocalBridge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: build/${{ matrix.name }}
+
+  build-web:
+    runs-on: ubuntu-latest
+    # 跳过测试版本 tag，允许手动触发
+    if: ${{ github.event_name == 'workflow_dispatch' || (!contains(github.ref_name, 'beta') && !contains(github.ref_name, 'test')) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+          cache-dependency-path: |
+            Editor/yarn.lock
+            DocumentStation/yarn.lock
+            Landing/yarn.lock
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+        working-directory: Editor
+
+      - name: Modify config for production build
+        run: |
+          # 将configStore.ts中的globalConfig.dev改为false
+          sed -i 's/dev: true,/dev: false,/g' Editor/src/stores/app/configStore.ts
+          echo "已修改configStore.ts中的dev配置为false"
+
+      - name: Build project (stable)
+        run: yarn build --mode stable
+        working-directory: Editor
+
+      - name: Create stable archive
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="test-$(date +%Y%m%d-%H%M%S)"
+          else
+            VERSION="${{ github.ref_name }}"
+          fi
+          cd Editor/dist
+          zip -r ../../MaaPipelineEditor-${VERSION}-stable.zip .
+          cd ../..
+        shell: bash
+
+      - name: Build docs
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="test-$(date +%Y%m%d-%H%M%S)"
+          else
+            VERSION="${{ github.ref_name }}"
+          fi
+          cd DocumentStation
+          yarn install
+          yarn build
+          cd ..
+          cd DocumentStation/docs/.vitepress/dist
+          zip -r ../../../../MaaPipelineEditor-${VERSION}-docs.zip .
+          cd ../../../..
+        shell: bash
+
+      - name: Build landing
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="test-$(date +%Y%m%d-%H%M%S)"
+          else
+            VERSION="${{ github.ref_name }}"
+          fi
+          cd Landing
+          yarn install --frozen-lockfile
+          yarn typecheck
+          yarn build
+          cd dist
+          zip -r ../../MaaPipelineEditor-${VERSION}-landing.zip .
+          cd ../..
+        shell: bash
+
+      - name: Upload web artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-packages
+          path: |
+            MaaPipelineEditor-*-stable.zip
+            MaaPipelineEditor-*-docs.zip
+            MaaPipelineEditor-*-landing.zip
+
+  release:
+    needs: [build-web, build-localbridge]
+    runs-on: ubuntu-latest
+    # 仅在 tag 触发时执行发布，手动触发时跳过
+    if: ${{ github.event_name == 'push' && !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'test') }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download web artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: web-packages
+
+      - name: Download LocalBridge artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: localbridge-artifacts
+          pattern: mpelb-*
+          merge-multiple: true
+
+      - name: Clean up redundant files
+        run: |
+          # 删除所有 artifacts 目录中的多余文件
+          find . -type f \( -name "index.html" -o -name "*.ico" -o -name "logo.png" -o -name "maafw.png" \) -delete
+          echo "已删除多余文件"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Generate Changelog
+        id: changelog
+        run: |
+          CURRENT_TAG="${{ github.ref_name }}"
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          node scripts/ci/render-release-notes.mjs \
+            --tag "$CURRENT_TAG" \
+            --previous-tag "$PREVIOUS_TAG" \
+            --update-logs Editor/src/data/updateLogs.ts \
+            --output CHANGELOG.md
+
+          # 输出到GitHub Actions
+          {
+            echo "changelog<<EOF"
+            cat CHANGELOG.md
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            MaaPipelineEditor-${{ github.ref_name }}-stable.zip
+            MaaPipelineEditor-${{ github.ref_name }}-docs.zip
+            MaaPipelineEditor-${{ github.ref_name }}-landing.zip
+            localbridge-artifacts/*
+          body_path: CHANGELOG.md
+          generate_release_notes: false
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

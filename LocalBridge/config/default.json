@@ -1,0 +1,37 @@
+{
+  "server": {
+    "port": 9066,
+    "host": "localhost",
+    "allowed_origins": [
+      "https://mpe.codax.site",
+      "http://localhost",
+      "http://127.0.0.1",
+      "http://[::1]"
+    ]
+  },
+  "file": {
+    "exclude": [
+      "node_modules",
+      ".git",
+      "dist",
+      "build"
+    ],
+    "extensions": [
+      ".json",
+      ".jsonc"
+    ]
+  },
+  "log": {
+    "level": "INFO",
+    "dir": "./logs",
+    "push_to_client": true
+  },
+  "maafw": {
+    "enabled": false,
+    "lib_dir": "",
+    "resource_dir": ""
+  },
+  "interface": {
+    "path": ""
+  }
+}

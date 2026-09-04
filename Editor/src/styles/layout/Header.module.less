@@ -1,0 +1,128 @@
+.container {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  .left {
+    display: flex;
+    align-items: center;
+
+    .logo {
+      width: 36px;
+    }
+
+    .title {
+      font-size: 20px;
+      font-weight: bold;
+      margin-left: 12px;
+    }
+
+    .full-title {
+      display: inline;
+    }
+
+    .medium-title {
+      display: none;
+    }
+
+    .short-title {
+      display: none;
+    }
+
+    @media (max-width: 1360px) {
+      .full-title {
+        display: none;
+      }
+
+      .medium-title {
+        display: inline;
+      }
+
+      .short-title {
+        display: none;
+      }
+    }
+
+    @media (max-width: 1260px) {
+      .full-title {
+        display: none;
+      }
+
+      .medium-title {
+        display: none;
+      }
+
+      .short-title {
+        display: inline;
+      }
+    }
+
+    .version {
+      margin-left: 8px;
+      display: inline-flex;
+      align-items: center;
+
+      > * {
+        margin-right: 4px;
+      }
+    }
+
+    @media (max-width: 1130px) {
+      .version {
+        display: none;
+      }
+    }
+  }
+
+  .right {
+    display: flex;
+    justify-content: right;
+    align-items: center;
+    gap: 10px;
+
+    .deviceButton {
+      :global(.ant-btn-icon) {
+        flex-shrink: 0;
+      }
+
+      > span:not(.anticon) {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        display: inline-block;
+        max-width: 100%;
+      }
+    }
+
+    .theme {
+      .themeButton {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        font-size: 18px;
+        transition: all 0.3s ease;
+
+        &:hover {
+          color: #1890ff;
+          transform: scale(1.1);
+          background-color: rgba(24, 144, 255, 0.08);
+        }
+
+        &:active {
+          transform: scale(0.95);
+        }
+      }
+    }
+
+    .links {
+      display: flex;
+      justify-content: right;
+      align-items: center;
+      gap: 12px;
+    }
+  }
+}

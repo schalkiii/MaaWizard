@@ -1,0 +1,309 @@
+import style from "../../../styles/panels/EdgePanel.module.less";
+
+import { memo, useMemo, useCallback, useEffect } from "react";
+import { Tag, InputNumber, Tooltip, Switch } from "antd";
+import classNames from "classnames";
+import { useShallow } from "zustand/shallow";
+import IconFont from "../../iconfonts";
+import { WikiAnchor } from "../../wiki/WikiAnchor";
+
+import {
+  useFlowStore,
+  type EdgeType,
+} from "../../../stores/flow";
+import {
+  NodeTypeEnum,
+  SourceHandleTypeEnum,
+  TargetHandleTypeEnum,
+} from "../../flow/nodes";
+import { useConfigStore } from "@/stores/app/configStore";
+import { usePanelOccupancy } from "../../../hooks/usePanelOccupancy";
+import { DraggablePanel } from "../common/DraggablePanel";
+
+// 获取连接类型信息
+const getEdgeTypeTags = (edge: EdgeType, targetIsAnchor: boolean) => {
+  const tags: { label: string; color: string }[] = [];
+
+  // jumpback
+  const isJumpBack = edge.targetHandle === TargetHandleTypeEnum.JumpBack;
+  if (isJumpBack) {
+    tags.push({ label: "jumpback", color: "orange" });
+  }
+
+  // anchor
+  if (targetIsAnchor) {
+    tags.push({ label: "anchor", color: "blue" });
+  }
+
+  // 基础连接类型
+  switch (edge.sourceHandle) {
+    case SourceHandleTypeEnum.Next:
+      tags.push({ label: "next", color: "green" });
+      break;
+    case SourceHandleTypeEnum.Error:
+      tags.push({ label: "on_error", color: "magenta" });
+      break;
+  }
+
+  return tags;
+};
+
+// 边信息展示
+const EdgeInfoElem = memo(
+  ({
+    edge,
+    sourceLabel,
+    targetLabel,
+    maxOrder,
+    tags,
+    onOrderChange,
+    onJumpBackChange,
+  }: {
+    edge: EdgeType;
+    sourceLabel: string;
+    targetLabel: string;
+    maxOrder: number;
+    tags: { label: string; color: string }[];
+    onOrderChange: (value: number) => void;
+    onJumpBackChange: (checked: boolean) => void;
+  }) => {
+    return (
+      <>
+        <div className={style.info}>
+          <div className={style["info-item"]}>
+            <span className={style.label}>源节点</span>
+            <span className={style.content}>{sourceLabel}</span>
+          </div>
+          <div className={style["info-item"]}>
+            <span className={style.label}>目标节点</span>
+            <span className={style.content}>{targetLabel}</span>
+          </div>
+          <div className={style["info-item"]}>
+            <span className={style.label}>连接类型</span>
+            <span className={style.content}>
+              {tags.map((tag, index) => (
+                <Tag key={index} color={tag.color}>
+                  {tag.label}
+                </Tag>
+              ))}
+            </span>
+          </div>
+          <div className={style["info-item"]}>
+            <span className={style.label}>顺序</span>
+            <span className={style.content}>
+              <InputNumber
+                size="small"
+                min={1}
+                max={maxOrder}
+                value={edge.label as number}
+                onChange={(val) => val && onOrderChange(val)}
+                style={{ width: 50 }}
+                controls={true}
+              />
+              <span style={{ marginLeft: 8, color: "#999", fontSize: 16 }}>
+                / {maxOrder}
+              </span>
+            </span>
+          </div>
+        </div>
+        {edge.sourceHandle === SourceHandleTypeEnum.Error && (
+          <div className={style["jumpback-section"]}>
+            <div className={style["info-item"]}>
+              <span className={style.label}>JumpBack</span>
+              <span className={style.content}>
+                <Switch
+                  size="small"
+                  checked={edge.attributes?.jump_back ?? false}
+                  onChange={onJumpBackChange}
+                />
+              </span>
+            </div>
+          </div>
+        )}
+      </>
+    );
+  },
+);
+
+// 边编辑面板
+function EdgePanel() {
+  const selectedEdges = useFlowStore((state) => state.selectedEdges);
+  const targetNode = useFlowStore((state) => state.targetNode);
+  const fieldPanelMode = useConfigStore(
+    (state) => state.configs.fieldPanelMode,
+  );
+  const { isDisplaced, activate, deactivate } =
+    usePanelOccupancy("edge");
+
+  // 判断是否只有一条边被选中且没有选中节点
+  const currentEdge = useMemo(() => {
+    if (selectedEdges.length === 1 && !targetNode) {
+      return selectedEdges[0];
+    }
+    return null;
+  }, [selectedEdges, targetNode]);
+
+  const { sourceLabel, targetLabel, targetIsAnchor } = useFlowStore(
+    useShallow((state) => {
+      if (!currentEdge) {
+        return {
+          sourceLabel: "",
+          targetLabel: "",
+          targetIsAnchor: false,
+        };
+      }
+      const sourceNode = state.nodes.find(
+        (node) => node.id === currentEdge.source,
+      );
+      const currentTargetNode = state.nodes.find(
+        (node) => node.id === currentEdge.target,
+      );
+      return {
+        sourceLabel: sourceNode?.data.label ?? "未知",
+        targetLabel: currentTargetNode?.data.label ?? "未知",
+        targetIsAnchor: currentTargetNode?.type === NodeTypeEnum.Anchor,
+      };
+    }),
+  );
+
+  // 当面板打开/关闭时同步占位系统
+  useEffect(() => {
+    if (fieldPanelMode === "inline") return;
+    if (currentEdge) {
+      activate();
+    } else {
+      deactivate();
+    }
+  }, [currentEdge, fieldPanelMode, activate, deactivate]);
+
+  useEffect(() => {
+    if (isDisplaced) {
+      const { edges, updateEdges } = useFlowStore.getState();
+      const selectedEdges = edges.filter((e) => e.selected);
+      if (selectedEdges.length > 0) {
+        updateEdges(
+          selectedEdges.map((e) => ({
+            type: "select" as const,
+            id: e.id,
+            selected: false,
+          })),
+        );
+      }
+    }
+  }, [isDisplaced]);
+
+  const edges = useFlowStore((state) => state.edges);
+  const setEdgeLabel = useFlowStore((state) => state.setEdgeLabel);
+  const setEdgeData = useFlowStore((state) => state.setEdgeData);
+  const updateEdges = useFlowStore((state) => state.updateEdges);
+
+  // 总边数
+  const maxOrder = useMemo(() => {
+    if (!currentEdge) return 1;
+    return edges.filter((e) => {
+      if (e.source !== currentEdge.source) return false;
+      return e.sourceHandle === currentEdge.sourceHandle;
+    }).length;
+  }, [currentEdge, edges]);
+
+  // 顺序变更处理
+  const handleOrderChange = useCallback(
+    (value: number) => {
+      if (currentEdge) {
+        setEdgeLabel(currentEdge.id, value);
+      }
+    },
+    [currentEdge, setEdgeLabel],
+  );
+
+  // jump_back 开关变更处理
+  const handleJumpBackChange = useCallback(
+    (checked: boolean) => {
+      if (currentEdge) {
+        setEdgeData(currentEdge.id, "jump_back", checked);
+      }
+    },
+    [currentEdge, setEdgeData],
+  );
+
+  // 删除连接
+  const handleDelete = useCallback(() => {
+    if (currentEdge) {
+      updateEdges([{ type: "remove", id: currentEdge.id }]);
+    }
+  }, [currentEdge, updateEdges]);
+
+  // 样式
+  const panelClass = useMemo(
+    () =>
+      classNames({
+        "panel-base": true,
+        [style.panel]: true,
+        "panel-show": currentEdge !== null,
+        "panel-draggable": fieldPanelMode === "draggable",
+      }),
+    [currentEdge, fieldPanelMode],
+  );
+
+  // 面板内容
+  const panelContent = (
+    <>
+      <div className="header">
+        <div className="header-left">
+        </div>
+        <div className="header-center">
+          <div className="title">连接设置</div>
+          <WikiAnchor path="10.工作流面板/40.连接.html" title="连接" description="节点间连接与流程编排" />
+        </div>
+        <div className="header-right">
+          {currentEdge && (
+            <Tooltip placement="top" title="删除连接">
+              <IconFont
+                className="icon-interactive"
+                name="icon-shanchu"
+                size={20}
+                color="#ff4a4a"
+                onClick={handleDelete}
+              />
+            </Tooltip>
+          )}
+        </div>
+      </div>
+      {currentEdge && (
+        <>
+          <EdgeInfoElem
+            edge={currentEdge}
+            sourceLabel={sourceLabel}
+            targetLabel={targetLabel}
+            maxOrder={maxOrder}
+            tags={getEdgeTypeTags(currentEdge, targetIsAnchor)}
+            onOrderChange={handleOrderChange}
+            onJumpBackChange={handleJumpBackChange}
+          />
+        </>
+      )}
+    </>
+  );
+
+  // 渲染
+  if (fieldPanelMode === "inline") {
+    return null;
+  }
+
+  if (fieldPanelMode === "draggable") {
+    return (
+      <DraggablePanel
+        isVisible={currentEdge !== null}
+        className={panelClass}
+        defaultRight={10}
+        defaultTop={70}
+      >
+        {panelContent}
+      </DraggablePanel>
+    );
+  }
+
+  return <div className={panelClass}>{panelContent}</div>;
+}
+
+export default memo(EdgePanel);

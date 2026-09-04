@@ -1,0 +1,21 @@
+{
+  "private": true,
+  "name": "MaaPipelineEditorDocSite",
+  "version": "1.0.0",
+  "description": "MaaPipelineEditor文档站",
+  "type": "module",
+  "scripts": {
+    "dev": "vitepress dev docs",
+    "build": "vitepress build docs",
+    "preview": "vitepress preview docs"
+  },
+  "devDependencies": {
+    "sass": "^1.103.1",
+    "vitepress": "^1.6.4",
+    "vitepress-plugin-llms": "^1.13.5"
+  },
+  "dependencies": {
+    "vitepress-theme-teek": "^1.6.2",
+    "vue": "^3.5.42"
+  }
+}

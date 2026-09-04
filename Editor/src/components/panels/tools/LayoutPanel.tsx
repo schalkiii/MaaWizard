@@ -1,0 +1,226 @@
+import { memo, useMemo, useCallback } from "react";
+import { message, Tooltip } from "antd";
+import classNames from "classnames";
+import IconFont from "../../iconfonts";
+import { type IconNames } from "../../iconfonts";
+import { useFlowStore } from "../../../stores/flow";
+import { useFileStore } from "@/stores/project/fileStore";
+import { LayoutHelper, AlignmentEnum } from "../../../core/layout";
+import { rerouteEdgesToNearestReplica } from "../../../core/parser/edgeRerouter";
+import { saveNodesToImage } from "../../../utils/ui/snapper";
+import { useEmbedMode } from "../../../hooks/useEmbedMode";
+import { sendToParent } from "../../../utils/embedBridge";
+import style from "../../../styles/panels/ToolPanel.module.less";
+
+/**布局工具 */
+interface LayoutToolType {
+  label: string;
+  iconName: string;
+  iconSize?: number;
+  iconColor?: string;
+  disabled?: boolean;
+  onClick: () => void;
+  onDisabledClick?: () => void;
+}
+
+function LayoutPanel() {
+  const debouncedSelectedNodes = useFlowStore(
+    (state) => state.debouncedSelectedNodes,
+  );
+  const nodeCount = useFlowStore((state) => state.nodes.length);
+  const currentFileName = useFileStore((state) => state.currentFile.fileName);
+  const shiftNodes = useFlowStore((state) => state.shiftNodes);
+  const resetEdgeControls = useFlowStore((state) => state.resetEdgeControls);
+
+  // 嵌入模式权限控制
+  const { isEmbed, isCapAllowed } = useEmbedMode();
+  const allowAutoLayout = !isEmbed || isCapAllowed("allowAutoLayout");
+
+  // 间距调整
+  const createShiftTool = useCallback(
+    (
+      label: string,
+      iconName: string,
+      direction: "horizontal" | "vertical",
+      delta: number,
+    ): LayoutToolType => ({
+      label,
+      iconName,
+      iconSize: 25,
+      iconColor: "#487aaa",
+      disabled:
+        debouncedSelectedNodes.length >= 2 ? false : nodeCount === 0,
+      onClick: () => {
+        const targetIds =
+          debouncedSelectedNodes.length >= 2
+            ? debouncedSelectedNodes.map((n) => n.id)
+            : undefined;
+        shiftNodes(direction, delta, targetIds);
+      },
+      onDisabledClick: () => message.error("没有可调整的节点"),
+    }),
+    [debouncedSelectedNodes, nodeCount, shiftNodes],
+  );
+
+  const layoutTools = useMemo<LayoutToolType[]>(() => {
+    return [
+      {
+        label: "居中对齐",
+        iconName: "icon-jurassic_horizalign-center",
+        iconSize: 30,
+        disabled: debouncedSelectedNodes.length < 2,
+        onClick: () =>
+          LayoutHelper.align(
+            AlignmentEnum.Center,
+            debouncedSelectedNodes as any,
+          ),
+        onDisabledClick: () =>
+          message.error("请选择两个以上的节点进行对齐操作"),
+      },
+      {
+        label: "顶部对齐",
+        iconName: "icon-jurassic_verticalalign-top",
+        iconSize: 30,
+        disabled: debouncedSelectedNodes.length < 2,
+        onClick: () =>
+          LayoutHelper.align(AlignmentEnum.Top, debouncedSelectedNodes as any),
+        onDisabledClick: () =>
+          message.error("请选择两个以上的节点进行对齐操作"),
+      },
+      {
+        label: "底部对齐",
+        iconName: "icon-jurassic_verticalalign-bottom",
+        iconSize: 30,
+        disabled: debouncedSelectedNodes.length < 2,
+        onClick: () =>
+          LayoutHelper.align(
+            AlignmentEnum.Bottom,
+            debouncedSelectedNodes as any,
+          ),
+        onDisabledClick: () =>
+          message.error("请选择两个以上的节点进行对齐操作"),
+      },
+      createShiftTool("缩减水平间距", "icon-shuipingsuoxiao", "horizontal", -5),
+      createShiftTool("增加水平间距", "icon-shuipingfangda", "horizontal", 5),
+      createShiftTool("缩减垂直间距", "icon-chuizhisuoxiao", "vertical", -5),
+      createShiftTool("增加垂直间距", "icon-chuizhifangda", "vertical", 5),
+      {
+        label: "还原连接线路径",
+        iconName: "icon-connecting_line",
+        iconSize: 24,
+        onClick: () => {
+          const { nodes, edges, setEdges, saveHistory } =
+            useFlowStore.getState();
+          const rerouted = rerouteEdgesToNearestReplica(nodes, edges);
+          setEdges(rerouted);
+          saveHistory(0, {
+            category: "edge",
+            action: "update",
+            description: "还原连接线路径",
+            targetIds: rerouted.map((edge) => edge.id),
+          });
+          resetEdgeControls();
+          message.success("连接线路径已还原");
+        },
+      },
+      {
+        label: debouncedSelectedNodes.length >= 2 ? "局部自动布局" : "自动布局",
+        iconName: "icon-liuchengtu",
+        iconSize: 30,
+        disabled:
+          !allowAutoLayout ||
+          debouncedSelectedNodes.length === 1 ||
+          nodeCount === 0,
+        onClick: () => {
+          if (!allowAutoLayout) {
+            sendToParent("mpe:error", {
+              code: "capability_denied",
+              message: "当前环境禁止自动布局",
+            });
+            return;
+          }
+          if (debouncedSelectedNodes.length >= 2) {
+            void LayoutHelper.autoPartial(debouncedSelectedNodes as any);
+          } else {
+            void LayoutHelper.auto();
+          }
+        },
+        onDisabledClick: () => {
+          if (!allowAutoLayout) {
+            sendToParent("mpe:error", {
+              code: "capability_denied",
+              message: "当前环境禁止自动布局",
+            });
+          } else {
+            message.error("请选择两个以上节点进行局部排版");
+          }
+        },
+      },
+      {
+        label: "将布局保存为图片",
+        iconName: "icon-guangquan",
+        iconSize: 24,
+        disabled: nodeCount === 0,
+        onClick: () => {
+          saveNodesToImage(
+            debouncedSelectedNodes as any,
+            useFlowStore.getState().nodes as any,
+            currentFileName,
+          );
+        },
+        onDisabledClick: () => message.error("没有可保存的节点"),
+      },
+    ];
+  }, [
+    allowAutoLayout,
+    currentFileName,
+    createShiftTool,
+    debouncedSelectedNodes,
+    nodeCount,
+    resetEdgeControls,
+  ]);
+
+  // 生成
+  const tools = layoutTools.map((item, index) => {
+    return (
+      <div key={item.label} className={style.group}>
+        <li className={style.item}>
+          <Tooltip placement="top" title={item.label}>
+            <IconFont
+              style={{ opacity: item.disabled ? 0.2 : 1 }}
+              className={style.icon}
+              name={item.iconName as IconNames}
+              size={item.iconSize ?? 24}
+              {...(item.iconColor ? { color: item.iconColor } : {})}
+              onClick={() => {
+                if (item.disabled) {
+                  item.onDisabledClick?.();
+                  return;
+                }
+                item.onClick?.();
+              }}
+            />
+          </Tooltip>
+        </li>
+        {index < layoutTools.length - 1 && (
+          <div className={style.devider}>
+            <div></div>
+          </div>
+        )}
+      </div>
+    );
+  });
+
+  // 渲染
+  const panelClass = useMemo(
+    () => classNames(style.panel, style["h-panel"], style["layout-panel"]),
+    [],
+  );
+  return (
+    <ul className={panelClass} data-panel-role="layout">
+      {tools}
+    </ul>
+  );
+}
+
+export default memo(LayoutPanel);

@@ -1,0 +1,112 @@
+import type {
+  NodeType,
+  EdgeType,
+  EdgeAttributesType,
+  PipelineNodeType,
+  RecognitionParamType,
+  ActionParamType,
+  OtherParamType,
+  ParamType,
+} from "../../stores/flow";
+import type { FileConfigType } from "@/stores/project/fileStore";
+import { SourceHandleTypeEnum } from "../../components/flow/nodes";
+import type { HandleDirection } from "../../components/flow/nodes/constants";
+import type { CoordinateMode } from "../../stores/flow/utils/coordinateUtils";
+
+// 配置标记常量
+export const configMark = "$__mpe_code";
+export const configMarkPrefix = "$__mpe_config_";
+export const externalMarkPrefix = "$__mpe_external_";
+export const anchorMarkPrefix = "$__mpe_anchor_";
+export const stickerMarkPrefix = "$__mpe_sticker_";
+export const groupMarkPrefix = "$__mpe_group_";
+
+// 解析后的Pipeline节点类型
+export type ParsedPipelineNodeType = {
+  [configMark]?: {
+    position: { x: number; y: number };
+    handleDirection?: HandleDirection;
+  };
+  recognition?: {
+    type: string;
+    param: RecognitionParamType;
+  };
+  action?: {
+    type: string;
+    param: ActionParamType;
+  };
+  [SourceHandleTypeEnum.Next]?: string[];
+  [SourceHandleTypeEnum.Error]?: string[];
+} & OtherParamType &
+  any;
+
+// Pipeline对象类型
+export type PipelineObjType = Record<string, ParsedPipelineNodeType>;
+
+// ID-Label对应关系类型
+export type IdLabelPairsType = {
+  id: string;
+  label: string;
+}[];
+
+// Pipeline配置类型
+export type PipelineConfigType = {
+  filename?: string;
+  version?: string;
+  prefix?: string;
+  coordinateMode?: CoordinateMode;
+  [key: string]: any;
+};
+
+// 节点配置类型
+export type NodeConfigType = {
+  position: { x: number; y: number };
+  handleDirection?: HandleDirection;
+  // 视觉副本的额外位置（仅 External / Anchor 适用）
+  // 主副本位置写入 position，从第二个起按节点顺序追加到此数组
+  extra_positions?: { x: number; y: number }[];
+};
+
+// MPE分离配置文件类型
+export type MpeConfigType = {
+  file_config: {
+    filename: string;
+    prefix?: string;
+    version?: string;
+    coordinateMode?: CoordinateMode;
+    savedViewport?: { x: number; y: number; zoom: number };
+    [key: string]: any;
+  };
+  node_configs: Record<string, NodeConfigType>;
+  external_nodes?: Record<string, NodeConfigType | any>;
+  anchor_nodes?: Record<string, NodeConfigType | any>;
+  sticker_nodes?: Record<string, any>;
+  group_nodes?: Record<string, any>;
+};
+
+// 导出选项
+export type FlowToOptions = {
+  nodes?: NodeType[];
+  edges?: EdgeType[];
+  fileName?: string;
+  config?: FileConfigType;
+  forceExportConfig?: boolean; // 强制导出配置
+};
+
+// 导入选项
+export type PipelineToFlowOptions = {
+  pString?: string; // Pipeline JSON 字符串
+  mpeConfig?: MpeConfigType; // 外部 MPE 配置
+};
+
+// 导出的公共类型
+export type {
+  NodeType,
+  EdgeType,
+  EdgeAttributesType,
+  PipelineNodeType,
+  RecognitionParamType,
+  ActionParamType,
+  OtherParamType,
+  ParamType,
+};
