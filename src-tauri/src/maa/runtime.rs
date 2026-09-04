@@ -1,5 +1,6 @@
 use std::os::raw::c_void;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -8,7 +9,8 @@ use maa_framework::resource::Resource;
 use maa_framework::MaaStatus;
 use maa_framework::sys::{
     MaaWin32InputMethod as Win32InputMethod, MaaWin32InputMethod_Seize,
-    MaaWin32ScreencapMethod as Win32ScreencapMethod, MaaWin32ScreencapMethod_All,
+    MaaWin32ScreencapMethod as Win32ScreencapMethod, MaaWin32ScreencapMethod_DXGI_DesktopDup_Window,
+    MaaWin32ScreencapMethod_FramePool, MaaWin32ScreencapMethod_PrintWindow,
 };
 use maa_framework::tasker::Tasker;
 use maa_framework::toolkit::Toolkit;
@@ -16,9 +18,68 @@ use serde::Serialize;
 
 /// Win32 截图/键鼠方式：注意 MaaFramework 里「传 0 = None（不启用任何方式）」，并不是
 /// "自动"，传 0 会导致连接看似成功但 post_screencap 永远失败（cache 为空，报 status 0）。
-/// 因此截图用 All（-1，框架自动挑选最快可用方法），键鼠用 Seize（无需管理员、兼容性好）。
-const WIN32_SCREENCAP_AUTO: Win32ScreencapMethod = MaaWin32ScreencapMethod_All as Win32ScreencapMethod;
-const WIN32_INPUT_AUTO: Win32InputMethod = MaaWin32InputMethod_Seize as Win32InputMethod;
+/// 截图只启用「窗口级」方式（FramePool / DXGI_DesktopDup_Window / PrintWindow）：
+/// All（-1）会放行 DXGI_DesktopDup（4，整块桌面）与 GDI/ScreenDC（屏幕 DC），
+/// 截到的是全屏而非目标窗口画面（2026-09-04 用户实测踩坑）。键鼠用 Seize（无需管理员）。
+pub(crate) const WIN32_SCREENCAP_WINDOW: Win32ScreencapMethod =
+    (MaaWin32ScreencapMethod_FramePool
+        | MaaWin32ScreencapMethod_DXGI_DesktopDup_Window
+        | MaaWin32ScreencapMethod_PrintWindow) as Win32ScreencapMethod;
+pub(crate) const WIN32_INPUT_AUTO: Win32InputMethod = MaaWin32InputMethod_Seize as Win32InputMethod;
+
+/// 进程级「库已加载」状态：MPE 文件桥等不走 Tauri 状态的模块也需要确保库可用，
+/// 因此以进程为单位记录加载状态，配合互斥锁保证整个进程只加载一次。
+static LIBRARY_LOADED: AtomicBool = AtomicBool::new(false);
+static LIBRARY_LOAD_LOCK: Mutex<()> = Mutex::new(());
+
+/// 进程级幂等加载 MaaFramework 动态库（指定路径）。
+fn ensure_library_loaded_at(dll: &Path) -> Result<String, String> {
+    if LIBRARY_LOADED.load(Ordering::Acquire) {
+        return Ok("MaaFramework 已加载".to_string());
+    }
+    let _guard = LIBRARY_LOAD_LOCK
+        .lock()
+        .map_err(|_| "库加载锁损坏".to_string())?;
+    if LIBRARY_LOADED.load(Ordering::Acquire) {
+        return Ok("MaaFramework 已加载".to_string());
+    }
+
+    // MaaFramework.dll 依赖同目录的 MaaUtils / opencv / onnxruntime 等 DLL，
+    // 而 Windows 加载 DLL 时不会搜索被加载 DLL 自身的目录，必须先把它加进搜索路径，
+    // 否则会报 LoadLibraryExW failed。
+    prepare_dll_search_path(dll);
+
+    maa_framework::load_library(dll).map_err(|e| {
+        format!(
+            "加载 {} 失败：{e}（该 DLL 依赖同目录的其他 DLL，请确认 maa-sdk/bin 完整且架构匹配）",
+            dll.display()
+        )
+    })?;
+
+    // 用户数据放在可执行文件旁边，避免 dev 模式下污染源码目录
+    let user_path = current_exe_dir().join("maa_userdata");
+    std::fs::create_dir_all(&user_path).map_err(|e| e.to_string())?;
+    Toolkit::init_option(user_path.to_str().unwrap_or("."), "{}").map_err(|e| e.to_string())?;
+
+    LIBRARY_LOADED.store(true, Ordering::Release);
+    Ok(format!(
+        "MaaFramework v{} 已加载：{}",
+        maa_framework::maa_version(),
+        dll.display()
+    ))
+}
+
+/// 进程级幂等加载 MaaFramework 动态库（默认 SDK 路径），任何模块均可安全调用。
+pub fn ensure_library_loaded() -> Result<String, String> {
+    let dll = resolve_existing_path("maa-sdk/bin/MaaFramework.dll");
+    if !dll.exists() {
+        return Err(format!(
+            "未找到 {}（请先执行 make fetch-sdk 下载 MaaFramework 运行时）",
+            dll.display()
+        ));
+    }
+    ensure_library_loaded_at(&dll)
+}
 
 /// 资源加载为异步操作，这里轮询等待其完成：200 × 50ms = 最多 10 秒
 const RESOURCE_LOAD_MAX_POLL: u32 = 200;
@@ -94,8 +155,9 @@ impl MaaRuntime {
     pub fn load_library(&self, dll_path: &str) -> Result<String, String> {
         let mut inner = self.lock()?;
 
-        // 幂等：已经加载过就直接返回，避免重复 load 报错
-        if inner.library_loaded {
+        // 幂等：本实例或进程内任何一处已加载成功就直接返回，避免重复 load 报错
+        if inner.library_loaded || LIBRARY_LOADED.load(Ordering::Acquire) {
+            inner.library_loaded = true;
             return Ok("MaaFramework 已加载".to_string());
         }
 
@@ -108,30 +170,9 @@ impl MaaRuntime {
             ));
         }
 
-        // MaaFramework.dll 依赖同目录的 MaaUtils / opencv / onnxruntime 等 DLL，
-        // 而 Windows 加载 DLL 时不会搜索被加载 DLL 自身的目录，必须先把它加进搜索路径，
-        // 否则会报 LoadLibraryExW failed。
-        prepare_dll_search_path(&resolved);
-
-        maa_framework::load_library(&resolved).map_err(|e| {
-            format!(
-                "加载 {} 失败：{}（该 DLL 依赖同目录的其他 DLL，请确认 maa-sdk/bin 完整且架构匹配）",
-                resolved.display(),
-                e
-            )
-        })?;
-
-        // 用户数据放在可执行文件旁边，避免 dev 模式下污染源码目录
-        let user_path = current_exe_dir().join("maa_userdata");
-        std::fs::create_dir_all(&user_path).map_err(|e| e.to_string())?;
-        Toolkit::init_option(user_path.to_str().unwrap_or("."), "{}").map_err(|e| e.to_string())?;
-
+        let message = ensure_library_loaded_at(&resolved)?;
         inner.library_loaded = true;
-        Ok(format!(
-            "MaaFramework v{} 已加载：{}",
-            maa_framework::maa_version(),
-            resolved.display()
-        ))
+        Ok(message)
     }
 
     /// 扫描已连接的 ADB 设备（含常见模拟器）
@@ -160,9 +201,13 @@ impl MaaRuntime {
     pub fn connect_win32(&self, hwnd: i64) -> Result<String, String> {
         self.ensure_loaded()?;
         let hwnd_ptr = hwnd as *mut c_void;
-        let controller =
-            Controller::new_win32(hwnd_ptr, WIN32_SCREENCAP_AUTO, WIN32_INPUT_AUTO, WIN32_INPUT_AUTO)
-                .map_err(|e| e.to_string())?;
+        let controller = Controller::new_win32(
+            hwnd_ptr,
+            WIN32_SCREENCAP_WINDOW,
+            WIN32_INPUT_AUTO,
+            WIN32_INPUT_AUTO,
+        )
+        .map_err(|e| e.to_string())?;
         self.attach_controller(controller, format!("Win32 hwnd={}", hwnd))
     }
 
@@ -305,9 +350,14 @@ impl MaaRuntime {
     }
 
     pub(crate) fn ensure_loaded(&self) -> Result<(), String> {
-        let inner = self.lock()?;
+        let mut inner = self.lock()?;
         if !inner.library_loaded {
-            return Err("尚未加载 MaaFramework 动态库，请先点击「加载动态库」".to_string());
+            // 桥等其他模块可能已按默认路径完成进程级加载，此时直接采纳
+            if LIBRARY_LOADED.load(Ordering::Acquire) {
+                inner.library_loaded = true;
+            } else {
+                return Err("尚未加载 MaaFramework 动态库，请先点击「加载动态库」".to_string());
+            }
         }
         Ok(())
     }
@@ -328,6 +378,21 @@ pub fn resolve_existing_path(input: &str) -> PathBuf {
         return direct;
     }
     resolve_in_bases(input, &candidate_bases(), false).unwrap_or(direct)
+}
+
+/// 定位「真实的」资源根目录：目录存在且含 `pipeline/` 或 `image/` 子目录。
+/// dev 期 cwd（src-tauri）下可能存在运行时误建的空壳 resource/（已 gitignore），
+/// 它会劫持 `resolve_existing_path("resource")` 的快捷分支，必须跳过。
+pub fn resolve_resource_root() -> PathBuf {
+    for base in candidate_bases() {
+        let candidate = base.join("resource");
+        if candidate.is_dir()
+            && (candidate.join("pipeline").is_dir() || candidate.join("image").is_dir())
+        {
+            return candidate;
+        }
+    }
+    resolve_existing_path("resource")
 }
 
 /// 解析写入目标路径：目标本身可能尚不存在，此时落到「父目录已存在」的候选，

@@ -87,10 +87,10 @@ pub fn save_template(image: &RgbaImage, path: &Path) -> Result<(), String> {
     image.save(path).map_err(|e| format!("保存模板失败：{}", e))
 }
 
-/// 把 MaaFramework 的 `MaaImageBuffer` 存成 PNG。
+/// 把 MaaFramework 的 `MaaImageBuffer` 转成 PNG 字节（附带宽高）。
 /// 优先用其编码数据（设备原始 PNG），编码不可用时回退到 raw(BGR(A)) 构造 RGBA 再编码，
-/// 确保控制器截图（`cached_image()` 常无编码字段）一定能存出图。
-pub fn save_maa_image(image: &MaaImageBuffer, path: &Path) -> Result<(), String> {
+/// 确保控制器截图（`cached_image()` 常无编码字段）一定能产出图。
+pub fn maa_image_png_bytes(image: &MaaImageBuffer) -> Result<(Vec<u8>, u32, u32), String> {
     let width = image.width();
     let height = image.height();
     let channels = image.channels();
@@ -98,25 +98,34 @@ pub fn save_maa_image(image: &MaaImageBuffer, path: &Path) -> Result<(), String>
         return Err("控制器截图无效（尺寸或通道数异常）".to_string());
     }
     if let Some(bytes) = image.to_vec().filter(|b| !b.is_empty()) {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(path, bytes).map_err(|e| e.to_string())?;
-        Ok(())
-    } else {
-        let raw = image.raw_data().ok_or("控制器截图为空，请确认已成功连接并截屏")?;
-        let src_channels = channels as usize;
-        let mut rgba: RgbaImage = ImageBuffer::new(width as u32, height as u32);
-        for (pixel, chunk) in rgba.pixels_mut().zip(raw.chunks_exact(src_channels)) {
-            *pixel = Rgba([
-                chunk[2],
-                chunk[1],
-                chunk[0],
-                if src_channels >= 4 { chunk[3] } else { 255 },
-            ]);
-        }
-        save_template(&rgba, path)
+        return Ok((bytes, width as u32, height as u32));
     }
+
+    let raw = image.raw_data().ok_or("控制器截图为空，请确认已成功连接并截屏")?;
+    let src_channels = channels as usize;
+    let mut rgba: RgbaImage = ImageBuffer::new(width as u32, height as u32);
+    for (pixel, chunk) in rgba.pixels_mut().zip(raw.chunks_exact(src_channels)) {
+        *pixel = Rgba([
+            chunk[2],
+            chunk[1],
+            chunk[0],
+            if src_channels >= 4 { chunk[3] } else { 255 },
+        ]);
+    }
+
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    rgba.write_to(&mut cursor, image::ImageFormat::Png)
+        .map_err(|e| format!("PNG 编码失败：{e}"))?;
+    Ok((cursor.into_inner(), width as u32, height as u32))
+}
+
+/// 把 MaaFramework 的 `MaaImageBuffer` 存成 PNG。
+pub fn save_maa_image(image: &MaaImageBuffer, path: &Path) -> Result<(), String> {
+    let (bytes, _, _) = maa_image_png_bytes(image)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, bytes).map_err(|e| format!("保存截图失败：{e}"))
 }
 
 #[cfg(test)]

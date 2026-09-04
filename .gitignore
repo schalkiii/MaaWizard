@@ -29,3 +29,7 @@ public/mpe/
 
 # npm install 生成的锁文件（上游用 yarn.lock），避免误提交污染 subtree
 tools/MaaPipelineEditor/Editor/package-lock.json
+
+# dev 期 Rust cwd 为 src-tauri，截图等运行时产物会落到 src-tauri/resource/
+# （仓库根的 resource/ 才是正式资源目录，由 resolve_existing_path() 回溯命中）
+src-tauri/resource/

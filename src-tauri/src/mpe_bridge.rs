@@ -2,25 +2,111 @@
 //!
 //! MPE 前端是纯静态网页（React + React Flow），默认通过 WebSocket 连接
 //! `ws://localhost:9066` 与本地"桥"通信，用来读写本地 pipeline 文件。
-//! 官方 LocalBridge（Go）目前只实现了「文件管理」这一类协议（列目录 / 打开 /
-//! 保存 / 创建），截图、控制器连接等尚未实现（由我们自己的运行页负责）。
+//! 官方 LocalBridge（Go）只实现了「文件管理」类协议；在此之上我们补齐了 MFW
+//! 控制器协议的 Win32 部分（窗口枚举 / 创建控制器 / 截图 / 断开），让 MPE 内置的
+//! 连接面板与实时画面（含 ROI 框选）直接可用，其余控制器类型仍由运行页负责。
 //!
 //! 这里用 Rust 在 Tauri 进程内起一个等价的 WS 服务，根目录指向 `resource/`，
 //! 让内嵌的 MPE 前端能直接编辑我们资源包里的 pipeline JSON。
 
+use std::collections::HashMap;
+use std::os::raw::c_void;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
+use maa_framework::controller::Controller;
+use maa_framework::resource::Resource;
+use maa_framework::tasker::Tasker;
+use maa_framework::MaaStatus;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::maa::resolve_existing_path;
+use crate::maa::{ensure_library_loaded, WIN32_INPUT_AUTO, WIN32_SCREENCAP_WINDOW};
 
 /// LocalBridge 默认端口，与 MPE 前端硬编码的 `ws://localhost:9066` 一致。
 pub const BRIDGE_PORT: u16 = 9066;
+
+/// MPE 侧持有的 Win32 控制器：与运行页的控制器相互独立，互不抢占。
+struct MpeController {
+    hwnd: i64,
+    controller: Controller,
+}
+
+/// MPE 侧控制器池。
+struct MpeControllerPool {
+    next_id: u64,
+    map: HashMap<String, MpeController>,
+}
+
+fn controller_pool() -> &'static Mutex<MpeControllerPool> {
+    static POOL: OnceLock<Mutex<MpeControllerPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        Mutex::new(MpeControllerPool {
+            next_id: 0,
+            map: HashMap::new(),
+        })
+    })
+}
+
+static DEBUG_SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
+static DEBUG_RUN_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 一次进行中的调试运行：持有 Tasker 以支持「停止」。
+struct DebugRunState {
+    run_id: String,
+    tasker: Tasker,
+}
+
+fn debug_run_state() -> &'static Mutex<Option<DebugRunState>> {
+    static STATE: OnceLock<Mutex<Option<DebugRunState>>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(None))
+}
+
+fn now_iso() -> String {
+    chrono::Local::now().to_rfc3339()
+}
+
+/// MPE 调试能力清单（与前端 `DebugCapabilityManifest` 对齐，camelCase 字段）。
+fn debug_capabilities() -> Value {
+    json!({
+        "generation": "debug-vNext",
+        "runModes": ["run-from-node", "single-node-run"],
+        "diagnostics": [],
+        "artifacts": [],
+        "screenshotSources": [],
+        "profileFeatures": [],
+        "maa": {
+            "mfwVersion": maa_framework::maa_version(),
+            "supportedControllers": ["win32"],
+            "supportedTaskerApis": ["post_task", "override_pipeline", "post_stop"],
+            "supportedResourceApis": ["post_bundle", "override_pipeline"],
+            "supportedAgentTransports": [],
+        },
+    })
+}
+
+fn debug_session_snapshot(session_id: &str, status: &str) -> Value {
+    json!({
+        "sessionId": session_id,
+        "status": status,
+        "createdAt": now_iso(),
+        "updatedAt": now_iso(),
+        "capabilities": debug_capabilities(),
+    })
+}
+
+/// 组装一条待发送的 WS 文本消息（供事件通道异步推送使用）。
+fn message_for(path: &str, data: Value) -> Message {
+    let text = serde_json::to_string(&json!({ "path": path, "data": data })).unwrap_or_default();
+    Message::text(text)
+}
 
 #[derive(Clone)]
 struct Bridge {
@@ -44,7 +130,9 @@ pub fn start() {
 }
 
 async fn run_server() -> Result<(), String> {
-    let root = resolve_existing_path("resource");
+    // 用「真实资源根」解析：跳过 dev 期 cwd 下运行时误建的空壳 resource/，
+    // 保证 MPE 看到的始终是仓库根的正式资源目录。
+    let root = crate::maa::resolve_resource_root();
     // 统一成绝对路径：MPE 前端可能以绝对路径访问文件，绝对根才能保证 safe_path 的
     // starts_with 判定在「相对输入」与「绝对输入」两种情形下都一致。
     let root = if root.is_absolute() {
@@ -92,39 +180,61 @@ async fn handle_conn(
         .map_err(|e| format!("WS 握手失败: {e}"))?;
     let (mut writer, mut reader) = ws_stream.split();
 
+    // 事件通道：调试运行等异步流程在完成后经此把消息推回本连接的客户端
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Message>();
+
     // 连接建立后先推送当前文件列表与资源包列表（LocalBridge 行为）。
     push_file_state(&mut writer, &bridge.root).await?;
 
-    while let Some(msg) = reader.next().await {
-        let msg = match msg {
-            Ok(m) => m,
-            Err(_) => break,
-        };
-        let text = match msg {
-            Message::Text(t) => t,
-            Message::Close(_) => break,
-            Message::Ping(p) => {
-                let _ = writer.send(Message::Pong(p)).await;
-                continue;
+    loop {
+        tokio::select! {
+            out = event_rx.recv() => {
+                match out {
+                    Some(message) => {
+                        if writer.send(message).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
             }
-            _ => continue,
-        };
-        let parsed: WsMessage = match serde_json::from_str(&text) {
-            Ok(p) => p,
-            Err(e) => {
-                let _ = send_error(&mut writer, "INVALID_REQUEST", &e.to_string()).await;
-                continue;
+            msg = reader.next() => {
+                let msg = match msg {
+                    Some(Ok(m)) => m,
+                    Some(Err(_)) | None => break,
+                };
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Close(_) => break,
+                    Message::Ping(p) => {
+                        let _ = writer.send(Message::Pong(p)).await;
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let parsed: WsMessage = match serde_json::from_str(&text) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let _ = send_error(&mut writer, "INVALID_REQUEST", &e.to_string()).await;
+                        continue;
+                    }
+                };
+                if let Err(e) = dispatch(&mut writer, &bridge, parsed, &event_tx).await {
+                    eprintln!("[mpe-bridge] 处理消息出错: {e}");
+                    let _ = send_error(&mut writer, "INTERNAL_ERROR", &e).await;
+                }
             }
-        };
-        if let Err(e) = dispatch(&mut writer, &bridge, parsed).await {
-            eprintln!("[mpe-bridge] 处理消息出错: {e}");
-            let _ = send_error(&mut writer, "INTERNAL_ERROR", &e).await;
         }
     }
     Ok(())
 }
 
-async fn dispatch<W>(writer: &mut W, bridge: &Bridge, msg: WsMessage) -> Result<(), String>
+async fn dispatch<W>(
+    writer: &mut W,
+    bridge: &Bridge,
+    msg: WsMessage,
+    events: &mpsc::UnboundedSender<Message>,
+) -> Result<(), String>
 where
     W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
@@ -209,11 +319,711 @@ where
             // 创建后重新推送最新文件列表与资源包信息（LocalBridge 行为）
             push_file_state(writer, &bridge.root).await
         }
+        // ---- MFW 控制器协议（Win32）：窗口枚举 / 连接 / 截图 / 断开 ----
+        "/etl/mfw/refresh_win32_windows" => handle_refresh_win32_windows(writer).await,
+        "/etl/mfw/create_win32_controller" => {
+            handle_create_win32_controller(writer, &msg.data).await
+        }
+        "/etl/mfw/request_screencap" => handle_request_screencap(writer, &msg.data).await,
+        "/etl/mfw/disconnect_controller" => handle_disconnect_controller(writer, &msg.data).await,
+        // ---- MPE 调试协议：能力清单 / 资源检测 / 会话 / 运行 ----
+        "/mpe/debug/capabilities" => {
+            send_json(writer, "/lte/debug/capabilities", debug_capabilities()).await
+        }
+        "/mpe/debug/resource/preflight" => {
+            handle_debug_resource_check(writer, &msg.data, "/lte/debug/resource_preflight").await
+        }
+        "/mpe/debug/resource/health" => {
+            handle_debug_resource_check(writer, &msg.data, "/lte/debug/resource_health").await
+        }
+        "/mpe/debug/session/create" => handle_debug_session_create(writer).await,
+        "/mpe/debug/session/destroy" => handle_debug_session_destroy(writer, &msg.data).await,
+        "/mpe/debug/run/start" => handle_debug_run_start(writer, &msg.data, events).await,
+        "/mpe/debug/run/stop" => handle_debug_run_stop(writer, &msg.data).await,
+        // ---- 杂项：模板弹窗的图片列表 ----
+        "/etl/get_image_list" => handle_get_image_list(writer, &bridge.root).await,
         other => {
             eprintln!("[mpe-bridge] 未处理的路由: {other}");
             Ok(())
         }
     }
+}
+
+/// 列举可自动化的桌面窗口，供 MPE 连接面板选择。
+async fn handle_refresh_win32_windows<W>(writer: &mut W) -> Result<(), String>
+where
+    W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    let windows = match ensure_library_loaded() {
+        Ok(_) => crate::device::list_windows().unwrap_or_default(),
+        Err(e) => {
+            eprintln!("[mpe-bridge] 窗口枚举失败：{e}");
+            Vec::new()
+        }
+    };
+    let list: Vec<Value> = windows
+        .iter()
+        .map(|w| {
+            json!({
+                "hwnd": w.hwnd.to_string(),
+                "class_name": w.class_name,
+                "window_name": w.window_name,
+                // MPE 连接表单从这里取候选；Rust 侧统一用 All/Seize，忽略具体选项
+                "screencap_methods": ["FramePool", "GDI", "DXGI_DesktopDup", "DXGI_DesktopDup_Window"],
+                "input_methods": ["Seize"],
+            })
+        })
+        .collect();
+    send_json(writer, "/lte/mfw/win32_windows", json!({ "windows": list })).await
+}
+
+/// 解析 MPE 传来的窗口句柄（字符串或数字均可）。
+fn parse_hwnd(data: &Value) -> Option<i64> {
+    let raw = data.get("hwnd")?;
+    if let Some(text) = raw.as_str() {
+        return text.trim().parse::<i64>().ok();
+    }
+    raw.as_i64().or_else(|| raw.as_u64().map(|v| v as i64))
+}
+
+/// 创建 Win32 控制器并保持连接，回执 controller_created。
+async fn handle_create_win32_controller<W>(writer: &mut W, data: &Value) -> Result<(), String>
+where
+    W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    let reply_error = |error: String| json!({ "success": false, "type": "win32", "error": error });
+
+    let Some(hwnd) = parse_hwnd(data) else {
+        return send_json(
+            writer,
+            "/lte/mfw/controller_created",
+            reply_error("缺少有效的 hwnd".to_string()),
+        )
+        .await;
+    };
+    if let Err(e) = ensure_library_loaded() {
+        return send_json(writer, "/lte/mfw/controller_created", reply_error(e)).await;
+    }
+
+    let hwnd_ptr = hwnd as *mut c_void;
+    let controller = match Controller::new_win32(
+        hwnd_ptr,
+        WIN32_SCREENCAP_WINDOW,
+        WIN32_INPUT_AUTO,
+        WIN32_INPUT_AUTO,
+    ) {
+        Ok(controller) => controller,
+        Err(e) => {
+            return send_json(
+                writer,
+                "/lte/mfw/controller_created",
+                reply_error(format!("创建 Win32 控制器失败：{e}")),
+            )
+            .await
+        }
+    };
+
+    match controller.post_connection() {
+        Ok(job) => {
+            let _ = controller.wait(job);
+        }
+        Err(e) => {
+            return send_json(
+                writer,
+                "/lte/mfw/controller_created",
+                reply_error(format!("连接窗口失败：{e}")),
+            )
+            .await
+        }
+    }
+    if !controller.connected() {
+        return send_json(
+            writer,
+            "/lte/mfw/controller_created",
+            reply_error(format!(
+                "连接窗口 hwnd={hwnd} 失败：请确认窗口可见且未被最小化"
+            )),
+        )
+        .await;
+    }
+
+    let controller_id = {
+        let mut pool = controller_pool()
+            .lock()
+            .map_err(|_| "控制器池锁损坏".to_string())?;
+        pool.next_id += 1;
+        let id = format!("win32-{}", pool.next_id);
+        pool.map.insert(id.clone(), MpeController { hwnd, controller });
+        id
+    };
+    send_json(
+        writer,
+        "/lte/mfw/controller_created",
+        json!({ "success": true, "controller_id": controller_id, "type": "win32" }),
+    )
+    .await
+}
+
+/// 截屏失败的统一回执。
+fn screencap_failure(base: &Value, error: &str) -> Value {
+    let mut payload = base.clone();
+    payload["success"] = json!(false);
+    payload["error"] = json!(error);
+    payload
+}
+
+/// 执行一帧截屏并编码为 PNG data URL（阻塞 FFI，供 spawn_blocking 调用）。
+fn do_screencap(controller: Controller, request_id: String, controller_id: String) -> Value {
+    let base = json!({ "request_id": request_id, "controller_id": controller_id });
+    if !controller.connected() {
+        return screencap_failure(&base, "控制器未连接");
+    }
+    let job = match controller.post_screencap() {
+        Ok(job) => job,
+        Err(e) => return screencap_failure(&base, &format!("截屏失败：{e}")),
+    };
+    let _ = controller.wait(job);
+    let image = match controller.cached_image() {
+        Ok(image) => image,
+        Err(_) => {
+            return screencap_failure(
+                &base,
+                "截图失败：控制器缓存为空，请确认目标窗口可见且未被最小化",
+            )
+        }
+    };
+    match crate::capture::maa_image_png_bytes(&image) {
+        Ok((bytes, width, height)) => {
+            let mut payload = base;
+            payload["success"] = json!(true);
+            payload["image"] = json!(format!(
+                "data:image/png;base64,{}",
+                BASE64_STANDARD.encode(&bytes)
+            ));
+            payload["width"] = json!(width);
+            payload["height"] = json!(height);
+            payload
+        }
+        Err(e) => screencap_failure(&base, &e),
+    }
+}
+
+/// 按 request_id 回一帧截图（MPE 实时画面 / 模板与 OCR 框选都依赖它）。
+async fn handle_request_screencap<W>(writer: &mut W, data: &Value) -> Result<(), String>
+where
+    W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    let request_id = data
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let controller_id = data
+        .get("controller_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let controller = controller_pool()
+        .lock()
+        .ok()
+        .and_then(|pool| pool.map.get(&controller_id).map(|c| c.controller.clone()));
+    let Some(controller) = controller else {
+        return send_json(
+            writer,
+            "/lte/mfw/screencap_result",
+            json!({
+                "request_id": request_id,
+                "controller_id": controller_id,
+                "success": false,
+                "error": "控制器不存在或已断开",
+            }),
+        )
+        .await;
+    };
+
+    // MaaFramework 截屏是阻塞 FFI 调用，放到阻塞线程避免卡住异步运行时
+    let request_id_blocking = request_id.clone();
+    let controller_id_blocking = controller_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        do_screencap(controller, request_id_blocking, controller_id_blocking)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        json!({
+            "request_id": request_id,
+            "controller_id": controller_id,
+            "success": false,
+            "error": e.to_string(),
+        })
+    });
+    send_json(writer, "/lte/mfw/screencap_result", result).await
+}
+
+/// 断开并移除 MPE 侧控制器。
+async fn handle_disconnect_controller<W>(writer: &mut W, data: &Value) -> Result<(), String>
+where
+    W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    let controller_id = data
+        .get("controller_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if let Ok(mut pool) = controller_pool().lock() {
+        pool.map.remove(&controller_id);
+    }
+    send_json(
+        writer,
+        "/lte/mfw/controller_status",
+        json!({ "connected": false, "controller_id": controller_id }),
+    )
+    .await
+}
+
+/// 校验资源路径并产出诊断（调试预检与健康检查共用）。
+async fn handle_debug_resource_check<W>(
+    writer: &mut W,
+    data: &Value,
+    reply_route: &str,
+) -> Result<(), String>
+where
+    W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    let started = std::time::Instant::now();
+    let request_id = data
+        .get("requestId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let paths: Vec<String> = data
+        .get("resourcePaths")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| p.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut diagnostics = Vec::new();
+    for path in &paths {
+        let dir = PathBuf::from(path);
+        if !dir.is_dir() {
+            diagnostics.push(json!({
+                "severity": "error",
+                "code": "debug.resource.missing",
+                "message": format!("资源路径不存在或不是目录：{path}"),
+            }));
+        } else if !dir.join("pipeline").is_dir()
+            && !dir.join("image").is_dir()
+            && !dir.join("interface.json").is_dir()
+        {
+            diagnostics.push(json!({
+                "severity": "warning",
+                "code": "debug.resource.suspicious",
+                "message": format!("目录未包含 pipeline/image/interface.json：{path}"),
+            }));
+        }
+    }
+    let has_error = diagnostics
+        .iter()
+        .any(|d| d["severity"] == json!("error"));
+
+    let mut payload = json!({
+        "resourcePaths": paths,
+        "status": if has_error { "failed" } else { "ready" },
+        "checkedAt": now_iso(),
+        "durationMs": started.elapsed().as_millis() as u64,
+        "diagnostics": diagnostics,
+    });
+    if let Some(rid) = request_id {
+        payload["requestId"] = json!(rid);
+    }
+    send_json(writer, reply_route, payload).await
+}
+
+async fn handle_debug_session_create<W>(writer: &mut W) -> Result<(), String>
+where
+    W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    let session_id = format!(
+        "dbg-session-{}",
+        DEBUG_SESSION_SEQ.fetch_add(1, Ordering::Relaxed) + 1
+    );
+    send_json(
+        writer,
+        "/lte/debug/session_created",
+        debug_session_snapshot(&session_id, "preparing"),
+    )
+    .await
+}
+
+async fn handle_debug_session_destroy<W>(writer: &mut W, data: &Value) -> Result<(), String>
+where
+    W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    let session_id = data
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if let Ok(mut state) = debug_run_state().lock() {
+        *state = None;
+    }
+    send_json(
+        writer,
+        "/lte/debug/session_destroyed",
+        json!({ "sessionId": session_id }),
+    )
+    .await
+}
+
+/// 从运行请求里解析要用的控制器：优先按 profile 里的 hwnd 匹配，否则取池中第一个。
+fn find_pool_controller(hwnd: Option<i64>) -> Option<Controller> {
+    let pool = controller_pool().lock().ok()?;
+    match hwnd {
+        Some(h) => pool
+            .map
+            .values()
+            .find(|c| c.hwnd == h)
+            .map(|c| c.controller.clone()),
+        None => pool.map.values().next().map(|c| c.controller.clone()),
+    }
+}
+
+/// 解析任意 JSON 值为 hwnd（字符串或数字）。
+fn parse_hwnd_value(value: &Value) -> Option<i64> {
+    if let Some(text) = value.as_str() {
+        return text.trim().parse::<i64>().ok();
+    }
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().map(|v| v as i64))
+}
+
+type DebugTaskJob = maa_framework::job::TaskJob<'static, maa_framework::common::TaskDetail>;
+
+/// 调试运行的阻塞准备段：加载资源、应用节点覆盖、绑定控制器并提交任务。
+fn prepare_debug_run(
+    controller: Controller,
+    resource_paths: Vec<String>,
+    overrides: Value,
+    entry: String,
+) -> Result<(Tasker, DebugTaskJob), String> {
+    ensure_library_loaded()?;
+    if !controller.connected() {
+        return Err("控制器未连接，请先在连接面板连接目标窗口".to_string());
+    }
+
+    let resource = Resource::new().map_err(|e| e.to_string())?;
+    for path in &resource_paths {
+        resource
+            .post_bundle(path)
+            .map_err(|e| format!("加载资源失败 {path}：{e}"))?;
+    }
+    // 资源加载是异步的，轮询等待（200 × 50ms = 最多 10 秒）
+    let mut loaded = false;
+    for _ in 0..200 {
+        loaded = resource.loaded();
+        if loaded {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !loaded {
+        return Err(format!("资源加载超时：{:?}", resource_paths));
+    }
+
+    if overrides.as_object().map(|m| !m.is_empty()).unwrap_or(false) {
+        resource
+            .override_pipeline_json(&overrides)
+            .map_err(|e| format!("应用节点覆盖失败：{e}"))?;
+    }
+
+    let tasker = Tasker::new().map_err(|e| e.to_string())?;
+    tasker
+        .bind(&resource, &controller)
+        .map_err(|e| e.to_string())?;
+    if !tasker.inited() {
+        return Err("Tasker 初始化失败：资源或控制器未就绪".to_string());
+    }
+    let job = tasker
+        .post_task(&entry, "{}")
+        .map_err(|e| format!("提交任务失败：{e}"))?;
+    Ok((tasker, job))
+}
+
+/// 启动调试运行：先回 run_started，再在后台等待任务完成并推送事件。
+async fn handle_debug_run_start<W>(
+    writer: &mut W,
+    data: &Value,
+    events: &mpsc::UnboundedSender<Message>,
+) -> Result<(), String>
+where
+    W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    let session_id = data
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mode = data
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let profile = data.get("profile").cloned().unwrap_or(json!({}));
+
+    let entry = data
+        .get("target")
+        .and_then(|t| t.get("runtimeName"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            profile
+                .get("entry")
+                .and_then(|e| e.get("runtimeName"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+    let Some(entry) = entry else {
+        return send_json(
+            writer,
+            "/lte/debug/error",
+            json!({ "code": "debug.run.no_entry", "message": "运行请求缺少入口节点" }),
+        )
+        .await;
+    };
+
+    let resource_paths: Vec<String> = profile
+        .get("resourcePaths")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| p.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if resource_paths.is_empty() {
+        return send_json(
+            writer,
+            "/lte/debug/error",
+            json!({ "code": "debug.run.no_resource", "message": "运行请求未携带资源路径" }),
+        )
+        .await;
+    }
+
+    // overrides: [{runtimeName, pipeline}] -> { runtimeName: pipeline }
+    let mut override_map = serde_json::Map::new();
+    if let Some(list) = data.get("overrides").and_then(|v| v.as_array()) {
+        for item in list {
+            if let (Some(name), Some(pipeline)) = (
+                item.get("runtimeName").and_then(|v| v.as_str()),
+                item.get("pipeline"),
+            ) {
+                override_map.insert(name.to_string(), pipeline.clone());
+            }
+        }
+    }
+
+    let hwnd = profile
+        .get("controller")
+        .and_then(|c| c.get("options"))
+        .and_then(|o| o.get("hwnd"))
+        .and_then(parse_hwnd_value);
+    let Some(controller) = find_pool_controller(hwnd) else {
+        return send_json(
+            writer,
+            "/lte/debug/error",
+            json!({ "code": "debug.run.no_controller", "message": "请先在连接面板连接目标窗口" }),
+        )
+        .await;
+    };
+
+    // 阻塞准备段放阻塞线程，避免卡住异步运行时
+    let entry_for_run = entry.clone();
+    let prepared = tauri::async_runtime::spawn_blocking(move || {
+        prepare_debug_run(controller, resource_paths, Value::Object(override_map), entry_for_run)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let (tasker, job) = match prepared {
+        Ok(ok) => ok,
+        Err(e) => {
+            return send_json(
+                writer,
+                "/lte/debug/error",
+                json!({ "code": "debug.run.failed", "message": e }),
+            )
+            .await
+        }
+    };
+
+    let run_id = format!("dbg-run-{}", DEBUG_RUN_SEQ.fetch_add(1, Ordering::Relaxed) + 1);
+    {
+        let mut state = debug_run_state()
+            .lock()
+            .map_err(|_| "调试状态锁损坏".to_string())?;
+        *state = Some(DebugRunState {
+            run_id: run_id.clone(),
+            tasker: tasker.clone(),
+        });
+    }
+
+    send_json(
+        writer,
+        "/lte/debug/run_started",
+        json!({
+            "sessionId": session_id,
+            "runId": run_id,
+            "mode": mode,
+            "entry": entry,
+            "startedAt": now_iso(),
+            "session": debug_session_snapshot(&session_id, "running"),
+        }),
+    )
+    .await?;
+
+    // 后台等待任务完成，把结果事件推回客户端
+    let events = events.clone();
+    let session_id_bg = session_id.clone();
+    let run_id_bg = run_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let status = tauri::async_runtime::spawn_blocking(move || job.wait())
+            .await
+            .unwrap_or(MaaStatus::FAILED);
+        let phase = if status == MaaStatus::SUCCEEDED {
+            "completed"
+        } else {
+            "failed"
+        };
+        let _ = events.send(message_for(
+            "/lte/debug/event",
+            json!({
+                "sessionId": session_id_bg,
+                "runId": run_id_bg,
+                "seq": 1,
+                "timestamp": now_iso(),
+                "source": "maafw",
+                "kind": "task",
+                "phase": phase,
+            }),
+        ));
+        let _ = events.send(message_for(
+            "/lte/debug/session_snapshot",
+            debug_session_snapshot(&session_id_bg, if phase == "completed" { "completed" } else { "failed" }),
+        ));
+        if let Ok(mut state) = debug_run_state().lock() {
+            *state = None;
+        }
+    });
+    Ok(())
+}
+
+async fn handle_debug_run_stop<W>(writer: &mut W, data: &Value) -> Result<(), String>
+where
+    W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    let session_id = data
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let stopped = debug_run_state().lock().ok().and_then(|state| {
+        state
+            .as_ref()
+            .map(|run| {
+                let _ = run.tasker.post_stop();
+                run.run_id.clone()
+            })
+    });
+    match stopped {
+        Some(run_id) => {
+            send_json(
+                writer,
+                "/lte/debug/run_stop_requested",
+                json!({ "sessionId": session_id, "runId": run_id, "reason": "用户请求停止" }),
+            )
+            .await
+        }
+        None => {
+            send_json(
+                writer,
+                "/lte/debug/error",
+                json!({ "code": "debug.stop.no_run", "message": "当前没有正在运行的调试任务" }),
+            )
+            .await
+        }
+    }
+}
+
+/// 递归收集 bundle image 目录下的图片（供模板弹窗的图片列表）。
+fn collect_images(dir: &Path, root: &Path, bundle: &str, out: &mut Vec<Value>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().map(|n| n == "image").unwrap_or(false) {
+                collect_image_files(&path, root, bundle, out);
+            } else {
+                collect_images(&path, root, bundle, out);
+            }
+        }
+    }
+}
+
+fn collect_image_files(dir: &Path, root: &Path, bundle: &str, out: &mut Vec<Value>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_image_files(&path, root, bundle, out);
+        } else if matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("png") | Some("jpg") | Some("jpeg") | Some("bmp") | Some("webp")
+        ) {
+            if let Some(rel) = path.strip_prefix(root).ok().and_then(|p| p.to_str()) {
+                out.push(json!({
+                    "relative_path": rel,
+                    "bundle_name": bundle,
+                    "file_name": path.file_name().unwrap_or_default().to_string_lossy(),
+                }));
+            }
+        }
+    }
+}
+
+async fn handle_get_image_list<W>(writer: &mut W, root: &Path) -> Result<(), String>
+where
+    W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    let mut images = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let bundle = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                collect_images(&path, root, &bundle, &mut images);
+            }
+        }
+    }
+    send_json(
+        writer,
+        "/lte/image_list",
+        json!({ "images": images, "bundle_name": "", "is_filtered": false }),
+    )
+    .await
 }
 
 /// 递归收集 MPE 关心的文件：各 bundle 的 `pipeline/**.json(c)` 与根目录的 `interface.json`。
@@ -565,6 +1375,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let bridge = Bridge { root: root.clone() };
         let mut sink = CaptureSink { items: Vec::new() };
+        let (event_tx, _event_rx) = mpsc::unbounded_channel::<Message>();
         let res = dispatch(
             &mut sink,
             &bridge,
@@ -572,6 +1383,7 @@ mod tests {
                 path: "/etl/open_file".to_string(),
                 data: json!({ "file_path": "../secret.json" }),
             },
+            &event_tx,
         )
         .await;
         assert!(res.is_err());
@@ -584,6 +1396,7 @@ mod tests {
         std::fs::create_dir_all(root.join("BundleA/pipeline")).unwrap();
         let bridge = Bridge { root: root.clone() };
         let mut sink = CaptureSink { items: Vec::new() };
+        let (event_tx, _event_rx) = mpsc::unbounded_channel::<Message>();
         let fp = root
             .join("BundleA/pipeline/new.json")
             .to_string_lossy()
@@ -597,6 +1410,7 @@ mod tests {
                 path: "/etl/save_file".to_string(),
                 data: json!({ "file_path": fp, "content": { "name": "n", "recognition": "Auto" } }),
             },
+            &event_tx,
         )
         .await
         .unwrap();
@@ -618,6 +1432,7 @@ mod tests {
                 path: "/etl/open_file".to_string(),
                 data: json!({ "file_path": fp }),
             },
+            &event_tx,
         )
         .await
         .unwrap();
@@ -625,6 +1440,80 @@ mod tests {
         assert_eq!(resp["path"], "/lte/file_content");
         assert_eq!(resp["data"]["content"]["name"], "n");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---------- MFW 控制器协议 ----------
+    #[tokio::test]
+    async fn dispatch_refresh_win32_windows_replies_list() {
+        let root = std::env::temp_dir().join(format!("mpe_wins_{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bridge = Bridge { root };
+        let mut sink = CaptureSink { items: Vec::new() };
+        let (event_tx, _event_rx) = mpsc::unbounded_channel::<Message>();
+        dispatch(
+            &mut sink,
+            &bridge,
+            WsMessage {
+                path: "/etl/mfw/refresh_win32_windows".to_string(),
+                data: json!({}),
+            },
+            &event_tx,
+        )
+        .await
+        .unwrap();
+        let first = sink.items.first().expect("应回窗口列表");
+        let resp: Value = serde_json::from_str(first.to_text().unwrap()).unwrap();
+        assert_eq!(resp["path"], "/lte/mfw/win32_windows");
+        assert!(resp["data"]["windows"].is_array());
+    }
+
+    #[tokio::test]
+    async fn dispatch_screencap_without_controller_reports_failure() {
+        let root = std::env::temp_dir().join(format!("mpe_cap_{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bridge = Bridge { root };
+        let mut sink = CaptureSink { items: Vec::new() };
+        let (event_tx, _event_rx) = mpsc::unbounded_channel::<Message>();
+        dispatch(
+            &mut sink,
+            &bridge,
+            WsMessage {
+                path: "/etl/mfw/request_screencap".to_string(),
+                data: json!({ "controller_id": "nope", "request_id": "r1" }),
+            },
+            &event_tx,
+        )
+        .await
+        .unwrap();
+        let resp: Value = serde_json::from_str(sink.items[0].to_text().unwrap()).unwrap();
+        assert_eq!(resp["path"], "/lte/mfw/screencap_result");
+        assert_eq!(resp["data"]["success"], false);
+        assert_eq!(resp["data"]["request_id"], "r1");
+    }
+
+    #[tokio::test]
+    async fn dispatch_resource_preflight_reports_ready() {
+        let root = std::env::temp_dir().join(format!("mpe_pf_{}", std::process::id()));
+        std::fs::create_dir_all(root.join("BundleA/pipeline")).unwrap();
+        let bridge = Bridge { root: root.clone() };
+        let mut sink = CaptureSink { items: Vec::new() };
+        let (event_tx, _event_rx) = mpsc::unbounded_channel::<Message>();
+        let bundle = root.join("BundleA").to_string_lossy().to_string();
+        dispatch(
+            &mut sink,
+            &bridge,
+            WsMessage {
+                path: "/mpe/debug/resource/preflight".to_string(),
+                data: json!({ "resourcePaths": [bundle] }),
+            },
+            &event_tx,
+        )
+        .await
+        .unwrap();
+        let resp: Value = serde_json::from_str(sink.items[0].to_text().unwrap()).unwrap();
+        assert_eq!(resp["path"], "/lte/debug/resource_preflight");
+        assert_eq!(resp["data"]["status"], "ready");
         let _ = std::fs::remove_dir_all(&root);
     }
 

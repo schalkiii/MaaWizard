@@ -26,6 +26,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync",
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 json5 = "0.4"
+# MPE 桥截图回传：PNG 以 data URL(base64) 走 WebSocket
+base64 = "0.22"
 
 # 录制引擎：inputbot 监听全局键鼠，scrap 截屏，image 做 ROI 裁剪与模板保存
 # strum 需与 inputbot 依赖的同版本，才能用 IntoEnumIterator 遍历全部按键
