@@ -38,6 +38,7 @@ const tabs: Array<{ key: TabKey; label: string }> = [
 ];
 
 const tab = ref<TabKey>("run");
+const editorMode = ref<"mpe" | "builtin">("mpe");
 const busy = ref(false);
 
 // 运行时
@@ -434,69 +435,93 @@ watch(resourceDir, () => {
       </p>
     </section>
 
-    <!-- 图编辑器 -->
-    <section v-else-if="tab === 'editor'" class="card">
-      <h2>图编辑器</h2>
-      <div class="row">
-        <select v-model="resourceDir" title="资源包目录">
-          <option v-for="opt in resourceOptions" :key="opt" :value="opt">{{ opt }}</option>
-        </select>
-        <button :disabled="busy" @click="onOpenPipeline">打开</button>
-        <input
-          v-model="newBundleName"
-          placeholder="新资源包名称"
-          style="width: 120px"
-          @keydown.enter.prevent="onCreateBundle"
-        />
-        <button :disabled="busy || !newBundleName.trim()" @click="onCreateBundle">新建</button>
-        <select v-model="saveVersion">
-          <option value="V1">导出 V1</option>
-          <option value="V2">导出 V2</option>
-        </select>
-        <button :disabled="busy" @click="onSavePipeline">保存</button>
-        <button :disabled="busy" @click="onAddNode">新建节点</button>
-        <button :disabled="busy || !selectedNode" @click="onDeleteNode">删除节点</button>
-        <button :disabled="busy" @click="onValidate">校验</button>
+    <!-- 图编辑器：默认内嵌 MaaPipelineEditor（通过启动时自动拉起的文件桥读写 resource/ 下的 pipeline） -->
+    <section v-else-if="tab === 'editor'" class="card editor-card">
+      <div class="row editor-head">
+        <h2>图编辑器</h2>
+        <div class="seg">
+          <button :class="{ active: editorMode === 'mpe' }" @click="editorMode = 'mpe'">
+            MaaPipelineEditor
+          </button>
+          <button :class="{ active: editorMode === 'builtin' }" @click="editorMode = 'builtin'">
+            内置编辑器
+          </button>
+        </div>
       </div>
 
-      <!-- 校验结果：点击问题可跳到对应节点 -->
-      <div v-if="issues.length > 0" class="issues">
-        <h3>校验结果：{{ errorCount }} 个错误、{{ issues.length - errorCount }} 个提示</h3>
-        <p
-          v-for="(issue, index) in issues"
-          :key="index"
-          :class="['issue', issue.level]"
-          @click="issue.node && (selectedNode = issue.node)"
-        >
-          <b>{{ issue.node || "文档" }}</b>
-          <code v-if="issue.field">{{ issue.field }}</code>
-          {{ issue.message }}
+      <!-- 内嵌 MaaPipelineEditor：前端会连 ws://localhost:9066（应用启动已自动拉起）读写 resource/ 下的 pipeline -->
+      <div v-if="editorMode === 'mpe'" class="mpe-wrap">
+        <p class="hint">
+          已内嵌 MaaPipelineEditor（离线版）。它直接通过本地文件桥读写
+          <code>resource/</code> 下的 pipeline 文件：左侧选资源包 / pipeline 文件即可编辑，
+          保存会直接写回磁盘（无需手动「加载资源」）。
         </p>
+        <iframe src="/mpe/index.html?link_lb" class="mpe-frame" title="MaaPipelineEditor"></iframe>
       </div>
-      <p v-else-if="validated" class="hint">校验通过，没有发现问题。</p>
 
-      <GraphEditor
-        :document="document"
-        :issues="issues"
-        :positions="positions"
-        :template-images="templateImages"
-        @select="selectedNode = $event"
-        @connect="onConnect"
-        @disconnect="onDisconnect"
-        @move="onNodeMove"
-      />
+      <!-- 内置编辑器（自研，作为 MPE 不可用时的回退） -->
+      <template v-else>
+        <div class="row">
+          <select v-model="resourceDir" title="资源包目录">
+            <option v-for="opt in resourceOptions" :key="opt" :value="opt">{{ opt }}</option>
+          </select>
+          <button :disabled="busy" @click="onOpenPipeline">打开</button>
+          <input
+            v-model="newBundleName"
+            placeholder="新资源包名称"
+            style="width: 120px"
+            @keydown.enter.prevent="onCreateBundle"
+          />
+          <button :disabled="busy || !newBundleName.trim()" @click="onCreateBundle">新建</button>
+          <select v-model="saveVersion">
+            <option value="V1">导出 V1</option>
+            <option value="V2">导出 V2</option>
+          </select>
+          <button :disabled="busy" @click="onSavePipeline">保存</button>
+          <button :disabled="busy" @click="onAddNode">新建节点</button>
+          <button :disabled="busy || !selectedNode" @click="onDeleteNode">删除节点</button>
+          <button :disabled="busy" @click="onValidate">校验</button>
+        </div>
 
-      <RoiCapture :resource-dir="resourceDir" @log="log" @apply="onApplyTemplate" />
+        <!-- 校验结果：点击问题可跳到对应节点 -->
+        <div v-if="issues.length > 0" class="issues">
+          <h3>校验结果：{{ errorCount }} 个错误、{{ issues.length - errorCount }} 个提示</h3>
+          <p
+            v-for="(issue, index) in issues"
+            :key="index"
+            :class="['issue', issue.level]"
+            @click="issue.node && (selectedNode = issue.node)"
+          >
+            <b>{{ issue.node || "文档" }}</b>
+            <code v-if="issue.field">{{ issue.field }}</code>
+            {{ issue.message }}
+          </p>
+        </div>
+        <p v-else-if="validated" class="hint">校验通过，没有发现问题。</p>
 
-      <div v-if="selectedNode && selectedNodeData()" class="inspector-wrap">
-        <NodeInspector
-          :name="selectedNode"
-          :node="selectedNodeData()!"
-          :controller="controller"
-          @save="onSaveNode"
+        <GraphEditor
+          :document="document"
+          :issues="issues"
+          :positions="positions"
+          :template-images="templateImages"
+          @select="selectedNode = $event"
+          @connect="onConnect"
+          @disconnect="onDisconnect"
+          @move="onNodeMove"
         />
-      </div>
-      <p v-else class="hint">点击画布中的节点以编辑其识别/动作参数。</p>
+
+        <RoiCapture :resource-dir="resourceDir" @log="log" @apply="onApplyTemplate" />
+
+        <div v-if="selectedNode && selectedNodeData()" class="inspector-wrap">
+          <NodeInspector
+            :name="selectedNode"
+            :node="selectedNodeData()!"
+            :controller="controller"
+            @save="onSaveNode"
+          />
+        </div>
+        <p v-else class="hint">点击画布中的节点以编辑其识别/动作参数。</p>
+      </template>
     </section>
 
     <!-- 录制 -->
@@ -666,5 +691,37 @@ button:disabled {
   border: 2px solid #16a34a;
   background: rgba(22, 163, 74, 0.18);
   pointer-events: none;
+}
+.editor-head {
+  align-items: center;
+  justify-content: space-between;
+}
+.seg {
+  display: flex;
+  gap: 4px;
+}
+.seg button {
+  padding: 6px 12px;
+  border: 1px solid #d1d5db;
+  background: #fff;
+  color: #374151;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.seg button.active {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #fff;
+}
+.mpe-wrap {
+  margin-top: 6px;
+}
+.mpe-frame {
+  width: 100%;
+  height: 78vh;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
 }
 </style>

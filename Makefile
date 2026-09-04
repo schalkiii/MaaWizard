@@ -1,7 +1,7 @@
 # MaaWizard 统一命令入口
 # 约定：所有构建/清理动作统一通过 make 目标触发，不在命令行中直接执行 rm
 
-.PHONY: help deps dev build check lint lint-rust lint-ts lint-md test test-rust test-web clean distclean fetch-sdk
+.PHONY: help deps dev build check lint lint-rust lint-ts lint-md test test-rust test-web clean distclean fetch-sdk mpe
 
 help:
 	@echo "可用目标："
@@ -12,8 +12,9 @@ help:
 	@echo "  make dev         启动 Tauri 开发模式（前端热更新 + Rust 调试构建）"
 	@echo "  make build       生产构建，产出安装包"
 	@echo "  make fetch-sdk   下载并解压 MaaFramework 官方运行时到 ./maa-sdk"
+	@echo "  make mpe         重建内嵌编辑器离线资源 public/mpe（该目录已 gitignore）"
 	@echo "  make clean       清理构建产物（dist / target / gen）"
-	@echo "  make distclean   在 clean 基础上额外清理 node_modules 与 SDK"
+	@echo "  make distclean   在 clean 基础上额外清理 node_modules、SDK 与 public/mpe"
 
 deps:
 	npm install
@@ -51,10 +52,18 @@ build:
 fetch-sdk:
 	powershell -NoProfile -ExecutionPolicy Bypass -File tools/fetch-maa-sdk.ps1
 
+# 重建内嵌编辑器（MaaPipelineEditor）离线资源 public/mpe
+# 该目录是 tools/MaaPipelineEditor 源码的构建产物，属衍生品，已 gitignore 不入库
+mpe:
+	cd tools/MaaPipelineEditor/Editor && npm install --no-audit --no-fund
+	cd tools/MaaPipelineEditor/Editor && npm run build -- --mode mpe
+	powershell -NoProfile -ExecutionPolicy Bypass -Command \
+		"New-Item -ItemType Directory -Force -Path public | Out-Null; robocopy tools\\MaaPipelineEditor\\Editor\\dist public\\mpe /MIR /NFL /NDL /NJH /NJS | Out-Null; if ($$LASTEXITCODE -ge 8) { exit 1 }"
+
 clean:
 	powershell -NoProfile -ExecutionPolicy Bypass -Command \
 		"Remove-Item -Recurse -Force dist,src-tauri\\target,src-tauri\\gen -ErrorAction SilentlyContinue"
 
 distclean: clean
 	powershell -NoProfile -ExecutionPolicy Bypass -Command \
-		"Remove-Item -Recurse -Force node_modules,maa-sdk -ErrorAction SilentlyContinue"
+		"Remove-Item -Recurse -Force node_modules,maa-sdk,public\\mpe -ErrorAction SilentlyContinue"

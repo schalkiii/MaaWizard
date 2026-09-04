@@ -21,6 +21,12 @@ serde_json = "1"
 # 因此 cargo check/build 不需要 SDK，仅实际运行任务时需要
 maa-framework = { version = "1", features = ["dynamic"] }
 
+# MPE 文件桥：在 Tauri 进程内起一个兼容 MaaPipelineEditor LocalBridge 的 WebSocket 服务
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+json5 = "0.4"
+
 # 录制引擎：inputbot 监听全局键鼠，scrap 截屏，image 做 ROI 裁剪与模板保存
 # strum 需与 inputbot 依赖的同版本，才能用 IntoEnumIterator 遍历全部按键
 inputbot = "0.6"

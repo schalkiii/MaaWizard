@@ -27,7 +27,10 @@ MaaWizard closes the gap: **record what you do, get a runnable pipeline immediat
 - **Text and key awareness** — consecutive keystrokes merge into a single `InputText`,
   function keys become `ClickKey` with the proper virtual key code
 - **Visual ROI picking** — drag a rectangle on a live screenshot to crop a template or set a `roi`
-- **Full Pipeline editor** — node graph (Vue Flow) with `next` / `on_error` edges and
+- **Embedded MaaPipelineEditor** — the graph-editor tab embeds MaaPipelineEditor (a mature
+  React/React-Flow editor) offline via an iframe plus a local file bridge (`ws://localhost:9066`)
+  that reads/writes `resource/`; the in-house Vue Flow editor stays as a fallback
+- **Full Pipeline editor (fallback)** — node graph (Vue Flow) with `next` / `on_error` edges and
   `[JumpBack]` markers; every MaaFramework recognition and action type supported
 - **Built-in guidance** — each recognition/action ships with effect, use case, parameter docs,
   and contextual warnings (e.g. `Shell` only works on Adb controllers)
@@ -69,6 +72,7 @@ Rust backend (src-tauri)
   ├─ recorder/   M2  input capture → steps → nodes
   ├─ capture/    M3  screenshot, ROI crop, template saving
   ├─ device/     M4  ADB devices, Win32 windows
+  ├─ mpe_bridge/ M7  MaaPipelineEditor LocalBridge-compatible WS file server (port 9066)
   └─ ai/         M6  python/uv/uvx detection, external subprocesses
 ```
 

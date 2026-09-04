@@ -12,10 +12,11 @@
   "globs": ["**/*.md"],
   // maa-sdk 为 fetch-sdk 下载的第三方依赖文档，不属于本项目，不参与 lint
   "ignores": [
-    "node_modules/**",
-    "target/**",
-    "dist/**",
+    "**/node_modules/**",
+    "**/target/**",
+    "**/dist/**",
     ".git/**",
-    "maa-sdk/**"
+    "**/maa-sdk/**",
+    "tools/MaaPipelineEditor/**"
   ]
 }

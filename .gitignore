@@ -22,3 +22,10 @@ Thumbs.db
 
 # 截图临时文件
 resource/.screenshot.png
+
+# 内嵌编辑器（MaaPipelineEditor）离线资源
+# 由 tools/MaaPipelineEditor 源码构建生成，属衍生产物，不入库；重建：make mpe
+public/mpe/
+
+# npm install 生成的锁文件（上游用 yarn.lock），避免误提交污染 subtree
+tools/MaaPipelineEditor/Editor/package-lock.json

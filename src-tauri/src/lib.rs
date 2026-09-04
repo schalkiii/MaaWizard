@@ -2,6 +2,7 @@ mod ai;
 mod capture;
 use tauri::Manager;
 mod commands;
+mod mpe_bridge;
 mod device;
 mod maa;
 mod pipeline;
@@ -29,6 +30,8 @@ pub fn run() {
                     dll.display()
                 );
             }
+            // 拉起 MPE 文件桥（供内嵌的 MaaPipelineEditor 前端读写 resource/ 下的 pipeline 文件）
+            mpe_bridge::start();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

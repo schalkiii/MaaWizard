@@ -28,6 +28,9 @@
 - npm 11 allow-scripts 拦截 esbuild/vue-demi 的 postinstall，但 vite 走平台包 `@esbuild/win32-x64` 不受影响，无需处理。
 - Cargo.toml 假改动：git status 显示 M 但 `git hash-object` 与索引 blob 一致，是 autocrlf(LF→CRLF) 噪音，勿 `git checkout` 还原。
 - maa-sdk（`maa-sdk/`，MAA-win-x86_64-v5.12.3）经 fetch-sdk 下载；dynamic 链接编译期不需，运行期 `load_library` 才需。
+- MPE 集成方式（2026-09-04 落地，选定 **git subtree + fork**）：上游 `kqcoxn/MaaPipelineEditor` → fork `schalkiii/MaaPipelineEditor`（remote 名 `mpe`）；fork 的 `maawizard` 分支 = 上游 `main`(9bf67f37) + 本地 3 个 patch（server.ts `ws://localhost`→`ws://127.0.0.1`、newcomerStore 新增 `skip()`、NewcomerGuideModal 加「跳过答题」），提交 `37e128b5`(+41/-8) 已推送。MaaWizard 侧 `git subtree add --prefix=tools/MaaPipelineEditor mpe maawizard --squash`，纳入 1183 文件，HEAD `1ce34224`；MPE 源码首次正式进版本库（此前是完全未跟踪的本地拷贝）。改 patch 用 `subtree push`；同步上游：fork 上 merge/rebase 后 `subtree pull --squash`。坑：(a) subtree 要求工作区干净，有未提交改动先 `git stash` 完事 `pop`；(b) 本仓库无全局 git 身份，subtree commit 需内联 `git -c user.*`；(c) 绝不能把旧本地拷贝整目录覆盖最新上游——会产生 119 文件/上万行的「回退上游进展」diff，只提交自己的 patch 文件。
+- `public/mpe/` 已加入 `.gitignore`（约 25 MB / 411 文件的构建产物）：源码经 subtree 入库后，产物即成为可重建的衍生品，不再入库（此前源码未入库时才有提交的必要）。重建统一 `make mpe`（npm install → `--mode mpe` 构建 → robocopy /MIR 镜像 `dist/`→`public/mpe`）；`make distclean` 会连它一起清。`tools/MaaPipelineEditor/Editor/package-lock.json`（npm install 生成，上游用 yarn）一并忽略，避免污染 subtree。
+- markdownlint 配置坑：`.markdownlint-cli2.jsonc` 的 `ignores` 必须用 `**/` 前缀（如 `**/node_modules/**`）才能匹配嵌套目录；根锚定写法 `node_modules/**` 会让 `tools/MaaPipelineEditor/Editor/node_modules` 等第三方依赖漏进 lint 报几千条。vendored 的 `tools/MaaPipelineEditor/**` 已加进 ignores 整体排除。注意 `globs:["**/*.md"]` 默认不跨点目录，故 `.codebuddy/memory/*.md` 不会被 `make lint` 扫到（编辑器插件单独 lint 即可）。
 
 ## 环境与编码踩坑（高复用）
 
@@ -40,3 +43,4 @@
 - 加载动态库：`load_library` 前 `SetDllDirectoryW(<DLL目录>)`，否则 `MaaFramework.dll` 找不到同目录的 MaaUtils/opencv/onnxruntime 依赖，报 LoadLibraryExW failed。
 - 运行排查：点运行后先 `load_resource` 自动加载资源包；`run_task_blocking` 以 `MaaStatus::SUCCEEDED` 判成败（仅 wait 会误报成功）；入口节点名须存在于已加载资源包；`list_resources` 只认含 `pipeline/` 或 `image/` 的目录。
 - 两种截图分工（不重复）：运行页『查看窗口画面』=`controller_screenshot`(仅目标窗口)；图编辑器/录制页 `RoiCapture`『截取屏幕』=`capture_desktop`(整屏框选ROI)。
+- **cargo 符号链接被环境拦截（2026-09-04 实测）**：`C:\Users\qi.shao\.cargo\bin\cargo.exe` 是 rustup 符号链接（→`rustup.exe`）。本环境对「不受信任的装入点」(untrusted reparse point) 执行做了拦截，直接 `cargo` 或 PowerShell `& cargo` 启动报「无法执行指定程序」/「无法遍历该路径(os error 448)」；但 `npm`(Node CreateProcess) 不受影响，故 `npm run build` 正常。`cargo test` 的 **doctest** 步骤因 cwd=`src-tauri` 装入点被拦（exit 101，库单测本身全过）。绕过：(a) 直接用真实二进制 `C:\Users\qi.shao\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe`；(b) 或把该工具链 bin 目录前置到 PATH 后再 `npm run tauri dev`。运行/测试后端统一用 `cargo test --lib --manifest-path src-tauri/Cargo.toml`（干净 54 passed），跳过会失败的 doctest。
