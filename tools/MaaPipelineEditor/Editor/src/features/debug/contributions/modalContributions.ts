@@ -1,0 +1,62 @@
+import { debugContributionRegistry } from "./registry";
+import type { DebugModalPanel } from "../types";
+
+const modalPanels: Array<{ id: DebugModalPanel; label: string }> = [
+  { id: "overview", label: "中控台" },
+  { id: "node-execution", label: "节点线" },
+  { id: "debug-log", label: "调试日志" },
+  { id: "resource-health", label: "资源体检" },
+  { id: "setup", label: "运行配置" },
+];
+
+export function registerDebugModalContributions(): void {
+  modalPanels.forEach((panel, index) => {
+    debugContributionRegistry.registerModalPanel({
+      ...panel,
+      order: index,
+    });
+  });
+
+  debugContributionRegistry.registerArtifactViewer({
+    id: "json-detail",
+    label: "JSON 详情",
+    mimePrefix: "application/json",
+  });
+  debugContributionRegistry.registerArtifactViewer({
+    id: "image-preview",
+    label: "图像预览",
+    mimePrefix: "image/",
+  });
+
+  debugContributionRegistry.registerCanvasOverlay({
+    id: "runtime-node-state",
+    label: "当前节点与执行结果",
+  });
+  debugContributionRegistry.registerCanvasOverlay({
+    id: "runtime-path",
+    label: "已执行路径",
+  });
+
+  debugContributionRegistry.registerNodeDebugAction({
+    id: "run-from-node",
+    label: "从此节点运行",
+    runMode: "run-from-node",
+  });
+  debugContributionRegistry.registerNodeDebugAction({
+    id: "single-node-run",
+    label: "单节点运行",
+    runMode: "single-node-run",
+  });
+  debugContributionRegistry.registerNodeDebugAction({
+    id: "recognition-only",
+    label: "仅识别",
+    runMode: "recognition-only",
+  });
+  debugContributionRegistry.registerNodeDebugAction({
+    id: "action-only",
+    label: "仅动作",
+    runMode: "action-only",
+  });
+}
+
+registerDebugModalContributions();

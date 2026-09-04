@@ -1,0 +1,367 @@
+import { Button, Dropdown, message } from "antd";
+import type { MenuProps } from "antd";
+import { ExportOutlined } from "@ant-design/icons";
+import { memo, useMemo, useState, useCallback } from "react";
+import {
+  useToolbarStore,
+  type ExportAction,
+} from "@/stores/ui/toolbarStore";
+import { useConfigStore } from "@/stores/app/configStore";
+import { useFileStore } from "@/stores/project/fileStore";
+import { useWSStore } from "@/stores/connection/wsStore";
+import { useFlowStore } from "../../../stores/flow";
+import { useShallow } from "zustand/shallow";
+import { flowToPipeline, flowToSeparatedStrings } from "../../../core/parser";
+import { ClipboardHelper } from "../../../utils/ui/clipboard";
+import { ExportFileModal } from "../../modals/ExportFileModal";
+import { CreateFileModal } from "../../modals/CreateFileModal";
+import { checkGuard } from "../../panels/settings/guardSystem";
+import GuardPromptModal from "../../modals/GuardPromptModal";
+import type { ConfigItemDef } from "../../panels/settings/settingsDefinitions";
+import style from "../../../styles/panels/ToolbarPanel.module.less";
+import { useEmbedMode } from "../../../hooks/useEmbedMode";
+import EmbedSaveButton from "./EmbedSaveButton";
+
+const actionGroupStyle = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+};
+
+/**
+ * 导出按钮组件
+ * 支持导出到粘贴板或文件,点击执行默认操作,悬停显示菜单
+ */
+function StandaloneExportButton() {
+  const { defaultExportAction, setDefaultExportAction } = useToolbarStore();
+  const configHandlingMode = useConfigStore(
+    (state) => state.configs.configHandlingMode,
+  );
+  const wsConnected = useWSStore((state) => state.connected);
+  const currentFilePath = useFileStore(
+    (state) => state.currentFile.config.filePath,
+  );
+  const saveFileToLocal = useFileStore((state) => state.saveFileToLocal);
+  const { selectedNodes, selectedEdges } = useFlowStore(
+    useShallow((state) => ({
+      selectedNodes: state.debouncedSelectedNodes,
+      selectedEdges: state.debouncedSelectedEdges,
+    })),
+  );
+
+  const [exportModalVisible, setExportModalVisible] = useState(false);
+  const [createFileModalVisible, setCreateFileModalVisible] = useState(false);
+  const [guardState, setGuardState] = useState<{
+    items: ConfigItemDef[];
+    onContinue: () => void;
+  } | null>(null);
+  const isPartable = selectedNodes.length > 0;
+
+  // 守卫检查：导出前确认关键配置已设置
+  const withGuardCheck = useCallback((action: () => void) => {
+    const result = checkGuard("export");
+    if (result.passed) {
+      action();
+      return;
+    }
+    setGuardState({
+      items: result.unconfiguredItems,
+      onContinue: () => {
+        setGuardState(null);
+        action();
+      },
+    });
+  }, []);
+
+  // 导出操作处理
+  const handleExportToClipboard = () => {
+    ClipboardHelper.write(flowToPipeline(), {
+      successMsg: "已将 Pipeline 导出到粘贴板",
+    });
+  };
+
+  const handleExportToFile = () => {
+    setExportModalVisible(true);
+  };
+
+  const handleSaveToLocal = useCallback(
+    async (mode?: "all" | "pipeline" | "config") => {
+      const success = await saveFileToLocal(undefined, undefined, mode);
+      if (!success) {
+        message.error("文件保存失败");
+      }
+    },
+    [saveFileToLocal],
+  );
+
+  const handleCreateFileWithLocal = () => {
+    setCreateFileModalVisible(true);
+  };
+
+  const handlePartialExport = useCallback(() => {
+    ClipboardHelper.write(
+      flowToPipeline({
+        nodes: selectedNodes,
+        edges: selectedEdges,
+      }),
+      { successMsg: "已将选中节点 Pipeline 导出到粘贴板" },
+    );
+  }, [selectedEdges, selectedNodes]);
+
+  const handleExportPipeline = () => {
+    const { pipelineString } = flowToSeparatedStrings();
+    ClipboardHelper.writeString(pipelineString, {
+      successMsg: "已将 Pipeline 导出到粘贴板",
+    });
+  };
+
+  const handleExportConfig = () => {
+    const { configString } = flowToSeparatedStrings();
+    ClipboardHelper.writeString(configString, {
+      successMsg: "已将配置导出到粘贴板",
+    });
+  };
+
+  // 执行对应的导出操作
+  const executeExportAction = useCallback((action: ExportAction) => {
+    switch (action) {
+      case "clipboard":
+        handleExportToClipboard();
+        break;
+      case "file":
+        handleExportToFile();
+        break;
+      case "save-local":
+        handleSaveToLocal();
+        break;
+      case "save-local-all":
+        handleSaveToLocal("all");
+        break;
+      case "save-local-pipeline":
+        handleSaveToLocal("pipeline");
+        break;
+      case "save-local-config":
+        handleSaveToLocal("config");
+        break;
+      case "partial":
+        handlePartialExport();
+        break;
+      case "export-pipeline":
+        handleExportPipeline();
+        break;
+      case "export-config":
+        handleExportConfig();
+        break;
+      case "create-local":
+        handleCreateFileWithLocal();
+        break;
+    }
+  }, [
+    handlePartialExport,
+    handleSaveToLocal,
+  ]);
+
+  // 点击按钮执行默认操作
+  const handleButtonClick = () => {
+    withGuardCheck(() => executeExportAction(defaultExportAction));
+  };
+
+  // 菜单项定义
+  const menuItems = useMemo<MenuProps["items"]>(() => {
+    const items: MenuProps["items"] = [
+      {
+        key: "clipboard",
+        label: "导出到粘贴板",
+        onClick: () => {
+          setDefaultExportAction("clipboard");
+          executeExportAction("clipboard");
+        },
+      },
+      {
+        key: "file",
+        label: "导出为文件",
+        onClick: () => {
+          setDefaultExportAction("file");
+          executeExportAction("file");
+        },
+      },
+    ];
+
+    // 仅在已连接本地服务且存在当前文件路径时显示
+    if (wsConnected && currentFilePath) {
+      if (configHandlingMode === "separated") {
+        // 分离导出模式下显示子菜单
+        items.push({
+          key: "save-local-group",
+          label: "保存到本地",
+          children: [
+            {
+              key: "save-local-all",
+              label: "全部保存",
+              onClick: () => {
+                setDefaultExportAction("save-local-all");
+                executeExportAction("save-local-all");
+              },
+            },
+            {
+              key: "save-local-pipeline",
+              label: "仅保存 Pipeline",
+              onClick: () => {
+                setDefaultExportAction("save-local-pipeline");
+                executeExportAction("save-local-pipeline");
+              },
+            },
+            {
+              key: "save-local-config",
+              label: "仅保存配置",
+              onClick: () => {
+                setDefaultExportAction("save-local-config");
+                executeExportAction("save-local-config");
+              },
+            },
+          ],
+        });
+      } else {
+        items.push({
+          key: "save-local",
+          label: "保存到本地",
+          onClick: () => {
+            setDefaultExportAction("save-local");
+            executeExportAction("save-local");
+          },
+        });
+      }
+    }
+
+    // 仅在已连接本地服务时显示
+    if (wsConnected) {
+      items.push({
+        key: "create-local",
+        label: "使用本地服务创建",
+        onClick: () => {
+          setDefaultExportAction("create-local");
+          executeExportAction("create-local");
+        },
+      });
+    }
+
+    // 仅在有选中节点时显示
+    if (isPartable) {
+      items.push(
+        { type: "divider" },
+        {
+          key: "partial",
+          label: "部分导出",
+          onClick: () => {
+            setDefaultExportAction("partial");
+            executeExportAction("partial");
+          },
+        },
+      );
+    }
+
+    // 仅在分离导出模式下显示
+    if (configHandlingMode === "separated") {
+      items.push(
+        { type: "divider" },
+        {
+          key: "export-pipeline",
+          label: "导出 Pipeline",
+          onClick: () => {
+            setDefaultExportAction("export-pipeline");
+            executeExportAction("export-pipeline");
+          },
+        },
+        {
+          key: "export-config",
+          label: "导出配置",
+          onClick: () => {
+            setDefaultExportAction("export-config");
+            executeExportAction("export-config");
+          },
+        },
+      );
+    }
+
+    return items;
+  }, [
+    configHandlingMode,
+    wsConnected,
+    currentFilePath,
+    isPartable,
+    executeExportAction,
+    setDefaultExportAction,
+  ]);
+
+  // 获取按钮文本和当前操作描述
+  const { buttonLabel, currentActionDesc } = useMemo(() => {
+    switch (defaultExportAction) {
+      case "clipboard":
+        return { buttonLabel: "导出", currentActionDesc: "粘贴板" };
+      case "file":
+        return { buttonLabel: "导出", currentActionDesc: "文件" };
+      case "save-local":
+        return { buttonLabel: "导出", currentActionDesc: "本地" };
+      case "save-local-all":
+        return { buttonLabel: "导出", currentActionDesc: "全部" };
+      case "save-local-pipeline":
+        return { buttonLabel: "导出", currentActionDesc: "Pipeline" };
+      case "save-local-config":
+        return { buttonLabel: "导出", currentActionDesc: "配置" };
+      case "partial":
+        return { buttonLabel: "导出", currentActionDesc: "部分" };
+      case "export-pipeline":
+        return { buttonLabel: "导出", currentActionDesc: "Pipeline" };
+      case "export-config":
+        return { buttonLabel: "导出", currentActionDesc: "配置" };
+      case "create-local":
+        return { buttonLabel: "导出", currentActionDesc: "本地创建" };
+      default:
+        return { buttonLabel: "导出", currentActionDesc: "粘贴板" };
+    }
+  }, [defaultExportAction]);
+
+  return (
+    <>
+      <div style={actionGroupStyle}>
+        <Dropdown
+          menu={{ items: menuItems }}
+          trigger={["hover"]}
+          placement="bottomLeft"
+          classNames={{ root: "toolbar-dropdown" }}
+          mouseEnterDelay={0}
+        >
+          <Button
+            icon={<ExportOutlined />}
+            onClick={handleButtonClick}
+            className={style.toolbarButton}
+          >
+            {buttonLabel}（{currentActionDesc}）
+          </Button>
+        </Dropdown>
+      </div>
+      <ExportFileModal
+        visible={exportModalVisible}
+        onCancel={() => setExportModalVisible(false)}
+      />
+      <CreateFileModal
+        visible={createFileModalVisible}
+        onCancel={() => setCreateFileModalVisible(false)}
+      />
+      {guardState && (
+        <GuardPromptModal
+          unconfiguredItems={guardState.items}
+          onContinue={guardState.onContinue}
+          onCancel={() => setGuardState(null)}
+        />
+      )}
+    </>
+  );
+}
+
+function ExportButton() {
+  const { isEmbed } = useEmbedMode();
+  return isEmbed ? <EmbedSaveButton /> : <StandaloneExportButton />;
+}
+
+export default memo(ExportButton);

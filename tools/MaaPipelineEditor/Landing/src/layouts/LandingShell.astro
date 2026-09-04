@@ -1,0 +1,141 @@
+---
+import "@/styles/global.css";
+
+import { siteMeta } from "@/content/landing";
+import { siteConfig } from "@/lib/site-config";
+
+type Props = {
+  title?: string;
+  description?: string;
+};
+
+const { title = siteMeta.title, description = siteMeta.description } = Astro.props;
+const canonicalUrl = new URL(Astro.url.pathname, siteConfig.siteUrl).toString();
+const ogImageUrl = new URL(siteMeta.ogImage, siteConfig.siteUrl).toString();
+const pageTitle = title === siteMeta.title ? title : `${title} | ${siteMeta.title}`;
+
+const structuredData = {
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  name: siteMeta.title,
+  description,
+  applicationCategory: "DeveloperApplication",
+  operatingSystem: "Web",
+  inLanguage: "zh-CN",
+  url: siteConfig.siteUrl,
+  downloadUrl: siteConfig.editorUrl,
+  softwareHelp: siteConfig.docsUrl,
+  sourceOrganization: {
+    "@type": "Organization",
+    name: "MaaPipelineEditor",
+    url: siteConfig.githubUrl,
+  },
+};
+---
+
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{pageTitle}</title>
+    <meta name="description" content={description} />
+    <meta name="keywords" content={siteMeta.keywords.join(", ")} />
+    <meta name="theme-color" content="#4F86FF" />
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="zh-CN" />
+    <meta property="og:title" content={pageTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonicalUrl} />
+    <meta property="og:image" content={ogImageUrl} />
+    <meta property="og:image:alt" content={siteMeta.ogAlt} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={pageTitle} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImageUrl} />
+    <link rel="canonical" href={canonicalUrl} />
+    <link rel="icon" href={siteConfig.resolveLandingPath("/logo.ico")} sizes="any" />
+    <link
+      rel="icon"
+      type="image/png"
+      href={siteConfig.resolveLandingPath("/logo.png")}
+    />
+    <link rel="apple-touch-icon" href={siteConfig.resolveLandingPath("/logo.png")} />
+    <script is:inline>
+      if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        document.documentElement.classList.add("has-scroll-reveal");
+      }
+    </script>
+    <script is:inline type="application/ld+json" set:html={JSON.stringify(structuredData)} />
+    {siteConfig.plausibleDomain && (
+      <script
+        is:inline
+        defer
+        data-domain={siteConfig.plausibleDomain}
+        src="https://plausible.io/js/script.js"
+      />
+    )}
+    <slot name="head" />
+  </head>
+  <body class="bg-canvas text-ink antialiased">
+    <div class="page-grid"></div>
+    <slot />
+    <script is:inline>
+      (() => {
+        if (!document.documentElement.classList.contains("has-scroll-reveal")) {
+          return;
+        }
+
+        const revealElements = Array.from(document.querySelectorAll("[data-reveal]"));
+
+        if (revealElements.length === 0) {
+          return;
+        }
+
+        const revealElement = (element) => {
+          element.classList.add("is-visible");
+        };
+
+        const shouldRevealImmediately = (element) => {
+          const rect = element.getBoundingClientRect();
+
+          return rect.top <= window.innerHeight * 0.9 && rect.bottom >= 0;
+        };
+
+        revealElements.forEach((element) => {
+          if (shouldRevealImmediately(element)) {
+            revealElement(element);
+          }
+        });
+
+        if (!("IntersectionObserver" in window)) {
+          revealElements.forEach(revealElement);
+          return;
+        }
+
+        const observer = new IntersectionObserver(
+          (entries, currentObserver) => {
+            entries.forEach((entry) => {
+              if (!entry.isIntersecting && entry.intersectionRatio <= 0.16) {
+                return;
+              }
+
+              revealElement(entry.target);
+              currentObserver.unobserve(entry.target);
+            });
+          },
+          {
+            threshold: 0.16,
+            rootMargin: "0px 0px -10% 0px",
+          },
+        );
+
+        revealElements.forEach((element) => {
+          if (!element.classList.contains("is-visible")) {
+            observer.observe(element);
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>

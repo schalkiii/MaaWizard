@@ -1,0 +1,366 @@
+import type { StateCreator } from "zustand";
+import {
+  applyEdgeChanges,
+  addEdge as addEdgeRF,
+  type EdgeChange,
+  type Connection,
+} from "@xyflow/react";
+import type { FlowStore, FlowEdgeState, EdgeType } from "../types";
+import { SourceHandleTypeEnum } from "../../../components/flow/nodes";
+import {
+  calcuLinkOrder,
+  getSelectedEdges,
+  hasMatchingConnection,
+} from "../utils/edgeUtils";
+import {
+  buildEdgeIndexes,
+  bumpGraphRevisions,
+  createEdgeIndexPatches,
+  patchEdgeIndexes,
+} from "../utils/graphIndex";
+import {
+  allocateEdgeId,
+  getNextEdgeIdCounter,
+} from "../utils/edgeId";
+
+export const createEdgeSlice: StateCreator<FlowStore, [], [], FlowEdgeState> = (
+  set,
+  get,
+) => ({
+  // 初始状态
+  edges: [],
+  edgeIdCounter: 1,
+  edgeControlResetKey: 0,
+  edgeControlResetTargetIds: null,
+
+  // 更新边
+  updateEdges(changes: EdgeChange[]) {
+    set((state) => {
+      let edges = [...state.edges];
+
+      // 更新前处理
+      changes.forEach((change) => {
+        if (change.type === "remove") {
+          const removedEdge = state.edgeById.get(change.id);
+          if (removedEdge) {
+            edges = edges.map((edge) => {
+              if (
+                edge.source === removedEdge.source &&
+                edge.sourceHandle === removedEdge.sourceHandle &&
+                edge.label > removedEdge.label
+              ) {
+                return { ...edge, label: edge.label - 1 };
+              }
+              return edge;
+            });
+          }
+        }
+      });
+
+      // 应用变更
+      const updatedEdges = applyEdgeChanges(changes, edges);
+      const newEdges = updatedEdges as EdgeType[];
+      const selectedEdges = getSelectedEdges(updatedEdges as EdgeType[]);
+      get().updateSelection(state.selectedNodes, selectedEdges);
+      const patches = createEdgeIndexPatches(state.edges, newEdges);
+      const hasTopologyChange = changes.some(
+        (change) =>
+          change.type === "add" ||
+          change.type === "remove" ||
+          change.type === "replace",
+      );
+      const hasSemanticChange = patches.some(
+        (patch) =>
+          patch.previous !== undefined &&
+          patch.next !== undefined &&
+          (patch.previous.label !== patch.next.label ||
+            patch.previous.attributes !== patch.next.attributes),
+      );
+      return {
+        edges: newEdges,
+        ...patchEdgeIndexes(state, patches),
+        ...bumpGraphRevisions(state, {
+          topology: hasTopologyChange,
+          semantic: hasSemanticChange,
+        }),
+      };
+    });
+
+    // 保存历史记录
+    const hasRemove = changes.some((change) => change.type === "remove");
+    const hasReplace = changes.some((change) => change.type === "replace");
+    const hasAdd = changes.some((change) => change.type === "add");
+    if (hasRemove) {
+      get().saveHistory(0, {
+        category: "edge",
+        action: "delete",
+        description: "删除连接",
+      });
+    } else if (hasReplace || hasAdd) {
+      get().saveHistory(0, {
+        category: "edge",
+        action: hasAdd ? "add" : "update",
+        description: hasAdd ? "添加连接" : "重连连接",
+      });
+    }
+  },
+
+  // 更新边数据
+  setEdgeData(id: string, key: string, value: any) {
+    set((state) => {
+      const edgeIndex = state.edges.findIndex((e) => e.id === id);
+      if (edgeIndex < 0) return {};
+
+      const edges = [...state.edges];
+      const targetEdge = {
+        ...edges[edgeIndex],
+        attributes: { ...edges[edgeIndex].attributes },
+      };
+
+      if (value === undefined || value === null || value === false) {
+        // 删除属性
+        delete targetEdge.attributes[key as keyof typeof targetEdge.attributes];
+        // attributes为空
+        if (Object.keys(targetEdge.attributes).length === 0) {
+          delete targetEdge.attributes;
+        }
+      } else {
+        // 设置属性
+        (targetEdge.attributes as any)[key] = value;
+      }
+
+      edges[edgeIndex] = targetEdge;
+
+      // 更新选中边列表
+      const selectedEdges = getSelectedEdges(edges);
+      get().updateSelection(state.selectedNodes, selectedEdges);
+
+      return {
+        edges,
+        ...patchEdgeIndexes(state, [
+          { previous: state.edges[edgeIndex], next: targetEdge },
+        ]),
+        ...bumpGraphRevisions(state, { semantic: true }),
+      };
+    });
+
+    // 保存历史记录
+    get().saveHistory(500, {
+      category: "edge",
+      action: "update",
+      description: "修改连接属性",
+      targetIds: [id],
+    });
+  },
+
+  // 更新边顺序
+  setEdgeLabel(id: string, newLabel: number) {
+    set((state) => {
+      const edgeIndex = state.edges.findIndex((e) => e.id === id);
+      if (edgeIndex < 0) return {};
+
+      const edges = [...state.edges];
+      const targetEdge = edges[edgeIndex];
+      const oldLabel = targetEdge.label as number;
+
+      if (newLabel === oldLabel) return {};
+
+      // 更新其他同源同类型边的顺序
+      edges.forEach((edge, index) => {
+        if (index === edgeIndex) return;
+        if (
+          edge.source === targetEdge.source &&
+          edge.sourceHandle === targetEdge.sourceHandle
+        ) {
+          const label = edge.label as number;
+          if (newLabel < oldLabel) {
+            // 向前移动
+            if (label >= newLabel && label < oldLabel) {
+              edges[index] = { ...edge, label: label + 1 };
+            }
+          } else {
+            // 向后移动
+            if (label > oldLabel && label <= newLabel) {
+              edges[index] = { ...edge, label: label - 1 };
+            }
+          }
+        }
+      });
+
+      // 更新目标边的顺序
+      edges[edgeIndex] = { ...targetEdge, label: newLabel };
+
+      // 更新选中边列表
+      const selectedEdges = getSelectedEdges(edges);
+      get().updateSelection(state.selectedNodes, selectedEdges);
+
+      return {
+        edges,
+        ...patchEdgeIndexes(
+          state,
+          createEdgeIndexPatches(state.edges, edges),
+        ),
+        ...bumpGraphRevisions(state, { semantic: true }),
+      };
+    });
+
+    // 保存历史记录
+    get().saveHistory(500, {
+      category: "edge",
+      action: "update",
+      description: "调整连接顺序",
+      targetIds: [id],
+    });
+  },
+
+  // 批量重排同源同类型边的顺序（一次拖拽一条历史）
+  reorderEdges(
+    source: string,
+    sourceHandle: SourceHandleTypeEnum,
+    orderedEdgeIds: string[],
+  ) {
+    set((state) => {
+      const edges = [...state.edges];
+
+      // 按新顺序给同组边重排 label（1..N 连续）
+      // 同组判定 = source + sourceHandle，与 setEdgeLabel 一致
+      orderedEdgeIds.forEach((id, index) => {
+        const edgeIndex = edges.findIndex((e) => e.id === id);
+        if (
+          edgeIndex >= 0 &&
+          edges[edgeIndex].source === source &&
+          edges[edgeIndex].sourceHandle === sourceHandle
+        ) {
+          edges[edgeIndex] = { ...edges[edgeIndex], label: index + 1 };
+        }
+      });
+
+      const selectedEdges = getSelectedEdges(edges);
+      get().updateSelection(state.selectedNodes, selectedEdges);
+      return {
+        edges,
+        ...patchEdgeIndexes(
+          state,
+          createEdgeIndexPatches(state.edges, edges),
+        ),
+        ...bumpGraphRevisions(state, { semantic: true }),
+      };
+    });
+
+    // 保存历史记录（拖拽结束是一次性动作，立即落盘）
+    get().saveHistory(0, {
+      category: "edge",
+      action: "update",
+      description: "批量调整连接顺序",
+      targetIds: orderedEdgeIds,
+    });
+  },
+
+  // 添加边
+  addEdge(co: Connection, options) {
+    const { isCheck = true } = options || {};
+
+    set((state) => {
+      // 检查冲突项
+      if (isCheck) {
+        const edges = state.edges;
+        if (hasMatchingConnection(edges, co)) return {};
+
+        let crash = null;
+
+        switch (co.sourceHandle) {
+          case SourceHandleTypeEnum.Next:
+            // next 和 on_error 不能同时指向同一个节点
+            crash = edges.find(
+              (edge) =>
+                edge.source === co.source &&
+                edge.target === co.target &&
+                edge.sourceHandle === SourceHandleTypeEnum.Error,
+            );
+            break;
+          case SourceHandleTypeEnum.Error:
+            // on_error 和 next 不能同时指向同一个节点
+            crash = edges.find(
+              (edge) =>
+                edge.source === co.source &&
+                edge.target === co.target &&
+                edge.sourceHandle === SourceHandleTypeEnum.Next,
+            );
+            break;
+        }
+
+        if (crash) return {};
+      }
+
+      // 计算链接次序
+      const order = calcuLinkOrder(
+        state.edges,
+        co.source,
+        co.sourceHandle as SourceHandleTypeEnum,
+      );
+
+      const newEdge = {
+        id: allocateEdgeId(
+          (edgeId) => state.edgeById.has(edgeId),
+          state.edgeIdCounter,
+        ).id,
+        type: "marked",
+        label: order,
+        ...co,
+      } as EdgeType;
+
+      const newEdges = addEdgeRF(newEdge, state.edges);
+      if (newEdges.length === state.edges.length) return {};
+
+      const edgeIdCounter = getNextEdgeIdCounter(
+        [newEdge.id],
+        state.edgeIdCounter,
+      );
+      return {
+        edges: newEdges,
+        edgeIdCounter,
+        ...patchEdgeIndexes(
+          state,
+          createEdgeIndexPatches(state.edges, newEdges),
+        ),
+        ...bumpGraphRevisions(state, { topology: true }),
+      };
+    });
+
+    // 保存历史记录
+    get().saveHistory(0, {
+      category: "edge",
+      action: "add",
+      description: "添加连接",
+    });
+  },
+
+  // 设置边列表
+  setEdges(edges: EdgeType[]) {
+    set((state) => ({
+      edges,
+      edgeIdCounter: getNextEdgeIdCounter(
+        edges.map((edge) => edge.id),
+        state.edgeIdCounter,
+      ),
+      ...buildEdgeIndexes(edges),
+      ...bumpGraphRevisions(state, {
+        topology: true,
+        semantic: true,
+      }),
+    }));
+  },
+
+  resetEdgeCounter() {
+    set({ edgeIdCounter: 1 });
+  },
+
+  // 重置所有边的控制点
+  resetEdgeControls(targetEdgeIds?: string[]) {
+    set((state) => ({
+      edgeControlResetKey: state.edgeControlResetKey + 1,
+      edgeControlResetTargetIds:
+        targetEdgeIds && targetEdgeIds.length > 0 ? targetEdgeIds : null,
+    }));
+  },
+});

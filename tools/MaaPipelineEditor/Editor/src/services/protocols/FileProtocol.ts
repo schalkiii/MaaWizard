@@ -1,0 +1,611 @@
+import { message, Modal, Button, Space } from "antd";
+import { createElement } from "react";
+import { BaseProtocol } from "./BaseProtocol";
+import type { LocalWebSocketServer } from "../server";
+import {
+  repairFileCacheForRoot,
+  useFileStore,
+} from "@/stores/project/fileStore";
+import { useConfigStore } from "@/stores/app/configStore";
+import {
+  useLocalFileStore,
+  type LocalFileInfo,
+} from "@/stores/project/localFileStore";
+import { areFilePathsEqual } from "@/stores/project/filePathUtils";
+
+/**
+ * 文件协议处理器
+ * 处理所有文件相关的WebSocket消息
+ */
+export class FileProtocol extends BaseProtocol {
+  // 当前显示的Modal实例
+  private currentModal: ReturnType<typeof Modal.confirm> | null = null;
+  // 最近保存的文件路径
+  private recentlySavedFiles: Map<string, number> = new Map();
+  // 待处理的变更文件
+  private pendingModifiedFiles: Map<string, string> = new Map();
+
+  // 等待保存确认的回调
+  private static pendingSaveCallbacks: Map<
+    string,
+    {
+      resolve: (success: boolean) => void;
+      timeout: ReturnType<typeof setTimeout>;
+    }
+  > = new Map();
+
+  // 保存确认超时时间
+  private static readonly SAVE_ACK_TIMEOUT = 10000;
+
+  getName(): string {
+    return "FileProtocol";
+  }
+
+  getVersion(): string {
+    return "1.0.0";
+  }
+
+  register(wsClient: LocalWebSocketServer): void {
+    this.wsClient = wsClient;
+
+    // 注册接收路由
+    this.wsClient.registerRoute("/lte/file_list", (data) =>
+      this.handleFileList(data),
+    );
+    this.wsClient.registerRoute("/lte/file_content", (data) =>
+      this.handleFileContent(data),
+    );
+    this.wsClient.registerRoute("/lte/file_changed", (data) =>
+      this.handleFileChanged(data),
+    );
+
+    // 注册确认路由
+    this.wsClient.registerRoute("/ack/save_file", (data) =>
+      this.handleSaveAck(data),
+    );
+    this.wsClient.registerRoute("/ack/save_separated", (data) =>
+      this.handleSaveSeparatedAck(data),
+    );
+    this.wsClient.registerRoute("/ack/create_file", (data) =>
+      this.handleCreateFileAck(data),
+    );
+    this.wsClient.registerRoute("/ack/open_external", (data) =>
+      this.handleOpenExternalAck(data),
+    );
+  }
+
+  protected handleMessage(_path: string, _data: any): void {
+    // 统一的消息处理入口
+  }
+
+  /**
+   * 处理文件列表推送
+   * 路由: /lte/file_list
+   */
+  private handleFileList(data: any): void {
+    try {
+      const { root, files, directories } = data;
+
+      if (!root || !Array.isArray(files)) {
+        console.error("[FileProtocol] Invalid file list data:", data);
+        return;
+      }
+
+      // 更新本地文件缓存
+      const localFileStore = useLocalFileStore.getState();
+      const wasRefreshing = localFileStore.isRefreshing;
+      localFileStore.setFileList(
+        root,
+        files as LocalFileInfo[],
+        Array.isArray(directories) ? directories : [],
+      );
+
+      const repairResult = repairFileCacheForRoot(root);
+      if (repairResult.staleFileNames.length > 0) {
+        message.info(
+          `已自动停用 ${repairResult.staleFileNames.length} 条过期文件缓存，请重新打开对应文件。`,
+        );
+      }
+
+      if (wasRefreshing) {
+        message.success(`文件列表刷新完成，共 ${files.length} 个文件`);
+      }
+    } catch (error) {
+      console.error("[FileProtocol] Failed to handle file list:", error);
+      message.error("文件列表更新失败");
+
+      // 重置刷新状态
+      const localFileStore = useLocalFileStore.getState();
+      localFileStore.setRefreshing(false);
+    }
+  }
+
+  /**
+   * 处理文件内容推送
+   * 路由: /lte/file_content
+   */
+  private async handleFileContent(data: any): Promise<void> {
+    try {
+      const { file_path, content, mpe_config, config_path } = data;
+
+      if (!file_path || !content) {
+        console.error("[FileProtocol] Invalid file content data:", data);
+        message.error("接收到的文件数据无效");
+        return;
+      }
+
+      const fileStore = useFileStore.getState();
+      const success = await fileStore.openFileFromLocal(
+        file_path,
+        content,
+        mpe_config,
+        config_path,
+      );
+
+      if (success) {
+        const fileName = file_path.split(/[/\\]/).pop();
+        if (mpe_config) {
+          message.success(`已打开文件: ${fileName} (含配置)`);
+        } else {
+          message.success(`已打开文件: ${fileName}`);
+        }
+      } else {
+        message.error("文件打开失败");
+      }
+    } catch (error) {
+      console.error("[FileProtocol] Failed to handle file content:", error);
+      message.error("文件导入失败");
+    }
+  }
+
+  /**
+   * 处理文件变化通知
+   * 路由: /lte/file_changed
+   */
+  private handleFileChanged(data: any): void {
+    try {
+      const { type, file_path, is_directory } = data;
+
+      if (!type || !file_path) {
+        console.error("[FileProtocol] Invalid file changed data:", data);
+        return;
+      }
+
+      const localFileStore = useLocalFileStore.getState();
+      const fileStore = useFileStore.getState();
+      const fileName = file_path.split(/[/\\]/).pop() || file_path;
+
+      switch (type) {
+        case "created":
+          break;
+
+        case "modified": {
+          localFileStore.updateFile(file_path);
+
+          // 检查是否是最近保存的文件
+          const lastSaveTime = this.recentlySavedFiles.get(file_path);
+          if (lastSaveTime && Date.now() - lastSaveTime < 1000) {
+            return;
+          }
+
+          // 检查是否已在编辑器中打开
+          const openedFile = fileStore.findFileByPath(file_path);
+          if (openedFile) {
+            fileStore.markFileModified(file_path);
+            this.showFileChangedNotification(file_path, fileName);
+          }
+          break;
+        }
+
+        case "deleted":
+          // 目录删除
+          if (is_directory) {
+            // 清理已打开的文件
+            const filesToRemove = fileStore.files.filter(
+              (f) =>
+                f.config.filePath &&
+                f.config.filePath.startsWith(
+                  file_path + (file_path.includes("/") ? "/" : "\\"),
+                ),
+            );
+            filesToRemove.forEach((f) => {
+              if (f.config.filePath) {
+                fileStore.markFileDeleted(f.config.filePath);
+              }
+            });
+          } else {
+            localFileStore.removeFile(file_path);
+            // 标记已打开的文件为已删除
+            const deletedFile = fileStore.findFileByPath(file_path);
+            if (deletedFile) {
+              fileStore.markFileDeleted(file_path);
+              message.warning(`文件"${fileName}"已被删除`);
+            }
+          }
+          break;
+
+        case "renamed": {
+          // 重命名
+          const renamedFiles = fileStore.files.filter(
+            (f) =>
+              f.config.filePath &&
+              (areFilePathsEqual(f.config.filePath, file_path) ||
+                f.config.filePath.startsWith(
+                  file_path + (file_path.includes("/") ? "/" : "\\"),
+                )),
+          );
+          renamedFiles.forEach((f) => {
+            if (f.config.filePath) {
+              fileStore.markFileDeleted(f.config.filePath);
+            }
+          });
+          break;
+        }
+
+        default:
+          console.warn("[FileProtocol] Unknown file change type:", type);
+      }
+    } catch (error) {
+      console.error("[FileProtocol] Failed to handle file changed:", error);
+    }
+  }
+
+  /**
+   * 处理保存成功确认
+   * 路由: /ack/save_file
+   */
+  private handleSaveAck(data: any): void {
+    try {
+      const { file_path, status } = data;
+      const success = status === "ok";
+
+      // 解析等待中的保存回调
+      FileProtocol.resolveSaveCallback(file_path, success);
+
+      if (success) {
+        const fileName = file_path.split(/[/\\]/).pop() || file_path;
+        message.success(`文件已保存: ${fileName}`);
+
+        // 忽略刚保存文件的变更通知（记录保存时间戳）
+        this.recentlySavedFiles.set(file_path, Date.now());
+      } else {
+        message.error("文件保存失败");
+      }
+    } catch (error) {
+      console.error("[FileProtocol] Failed to handle save ack:", error);
+    }
+  }
+
+  /**
+   * 处理分离保存成功确认
+   * 路由: /ack/save_separated
+   */
+  private handleSaveSeparatedAck(data: any): void {
+    try {
+      const { pipeline_path, config_path, status } = data;
+      const success = status === "ok";
+
+      // 解析等待中的保存回调
+      FileProtocol.resolveSaveCallback(pipeline_path, success);
+
+      if (success) {
+        const pipelineName =
+          pipeline_path.split(/[/\\]/).pop() || pipeline_path;
+        const configName = config_path.split(/[/\\]/).pop() || config_path;
+        message.success(`文件已保存: ${pipelineName} + ${configName}`);
+
+        // 忽略刚保存文件的变更通知
+        this.recentlySavedFiles.set(pipeline_path, Date.now());
+        this.recentlySavedFiles.set(config_path, Date.now());
+      } else {
+        message.error("文件保存失败");
+      }
+    } catch (error) {
+      console.error(
+        "[FileProtocol] Failed to handle save separated ack:",
+        error,
+      );
+    }
+  }
+
+  /**
+   * 处理创建文件成功确认
+   * 路由: /ack/create_file
+   */
+  private handleCreateFileAck(data: any): void {
+    try {
+      const { file_path, status } = data;
+
+      if (status === "ok") {
+        const fileName = file_path.split(/[/\\]/).pop() || file_path;
+        message.success(`文件已创建: ${fileName}`);
+
+        // 更新当前文件的路径配置
+        const fileStore = useFileStore.getState();
+        const configStore = useConfigStore.getState();
+
+        // 更新文件路径
+        fileStore.setFileConfig("filePath", file_path);
+
+        // 如果是分离模式，更新配置文件路径
+        if (configStore.configs.configHandlingMode === "separated") {
+          // 生成配置文件路径
+          const lastSep = Math.max(
+            file_path.lastIndexOf("/"),
+            file_path.lastIndexOf("\\"),
+          );
+          const directory = file_path.substring(0, lastSep + 1);
+          const fileName = file_path.substring(lastSep + 1);
+          const baseName = fileName.replace(/\.(json|jsonc)$/i, "");
+          const configPath = `${directory}.${baseName}.mpe.json`;
+          fileStore.setFileConfig("separatedConfigPath", configPath);
+        }
+
+        // 更新同步时间
+        fileStore.setFileConfig("lastSyncTime", Date.now());
+      } else {
+        message.error("文件创建失败");
+      }
+    } catch (error) {
+      console.error("[FileProtocol] Failed to handle create file ack:", error);
+    }
+  }
+
+  /** 处理系统编辑器打开请求确认 */
+  private handleOpenExternalAck(data: any): void {
+    if (data?.status === "ok") {
+      message.success(`已在本地打开: ${data.file_path || "文件"}`);
+    } else {
+      message.error(data?.message || "无法在本地打开文件");
+    }
+  }
+
+  /**
+   * 请求打开文件
+   * 发送路由: /etl/open_file
+   */
+  public requestOpenFile(filePath: string): boolean {
+    if (!this.wsClient) {
+      console.error("[FileProtocol] WebSocket client not initialized");
+      return false;
+    }
+
+    return this.wsClient.send("/etl/open_file", {
+      file_path: filePath,
+    });
+  }
+
+  /** 请求使用操作系统默认程序打开文件 */
+  public requestOpenExternalFile(filePath: string): boolean {
+    if (!this.wsClient) {
+      console.error("[FileProtocol] WebSocket client not initialized");
+      return false;
+    }
+
+    return this.wsClient.send("/etl/open_external", {
+      file_path: filePath,
+    });
+  }
+
+  /**
+   * 请求创建文件
+   * 发送路由: /etl/create_file
+   */
+  public requestCreateFile(
+    fileName: string,
+    directory: string,
+    content?: any,
+  ): boolean {
+    if (!this.wsClient) {
+      console.error("[FileProtocol] WebSocket client not initialized");
+      return false;
+    }
+
+    return this.wsClient.send("/etl/create_file", {
+      file_name: fileName,
+      directory,
+      content,
+    });
+  }
+
+  /**
+   * 请求分离保存文件
+   * 发送路由: /etl/save_separated
+   */
+  public requestSaveSeparated(
+    pipelinePath: string,
+    configPath: string,
+    pipeline: any,
+    config: any,
+  ): boolean {
+    if (!this.wsClient) {
+      console.error("[FileProtocol] WebSocket client not initialized");
+      return false;
+    }
+
+    return this.wsClient.send("/etl/save_separated", {
+      pipeline_path: pipelinePath,
+      config_path: configPath,
+      pipeline,
+      config,
+    });
+  }
+
+  /**
+   * 请求重新加载文件
+   */
+  private requestFileReload(filePath: string): void {
+    this.currentModal?.destroy();
+    this.currentModal = null;
+
+    if (!this.requestOpenFile(filePath)) {
+      message.error("重新加载请求发送失败");
+    }
+  }
+
+  /**
+   * 显示文件变更对话框
+   */
+  private showFileChangedNotification(
+    filePath: string,
+    fileName: string,
+  ): void {
+    const configStore = useConfigStore.getState();
+
+    // 自动重载
+    if (configStore.configs.fileAutoReload) {
+      this.requestFileReload(filePath);
+      message.info(`文件"${fileName}"已自动重新加载`);
+      return;
+    }
+
+    // 收集变更文件
+    this.pendingModifiedFiles.set(filePath, fileName);
+
+    // 如果已有 Modal 显示更新内容
+    if (this.currentModal) {
+      this.updateFileChangedModal();
+      return;
+    }
+
+    this.showFileChangedModal();
+  }
+
+  /**
+   * 显示/更新文件变更 Modal
+   */
+  private showFileChangedModal(): void {
+    const configStore = useConfigStore.getState();
+
+    const handleReloadAll = () => {
+      // 重新加载所有变更文件
+      const filePaths = Array.from(this.pendingModifiedFiles.keys());
+      this.pendingModifiedFiles.clear();
+      this.currentModal?.destroy();
+      this.currentModal = null;
+
+      // 如果有变更重新加载当前文件
+      const currentFilePath =
+        useFileStore.getState().currentFile.config.filePath;
+      if (currentFilePath && filePaths.includes(currentFilePath)) {
+        this.requestOpenFile(currentFilePath);
+      } else if (filePaths.length > 0) {
+        // 加载第一个变更文件
+        this.requestOpenFile(filePaths[0]);
+      }
+    };
+
+    const handleDismiss = () => {
+      this.pendingModifiedFiles.clear();
+      this.currentModal?.destroy();
+      this.currentModal = null;
+    };
+
+    const handleAutoReload = () => {
+      configStore.setConfig("fileAutoReload", true);
+      this.pendingModifiedFiles.clear();
+      this.currentModal?.destroy();
+      this.currentModal = null;
+      message.success("已开启自动重载，后续文件变更将自动应用");
+    };
+
+    const buildModalContent = (): string => {
+      const count = this.pendingModifiedFiles.size;
+      if (count === 1) {
+        const fileName = Array.from(this.pendingModifiedFiles.values())[0];
+        return `文件"${fileName}"已被外部修改，请选择处理方式：`;
+      }
+      const fileNames = Array.from(this.pendingModifiedFiles.values());
+      const displayNames =
+        fileNames.length <= 3
+          ? fileNames.map((n) => `"${n}"`).join("、")
+          : `${fileNames
+              .slice(0, 3)
+              .map((n) => `"${n}"`)
+              .join("、")} 等 ${count} 个文件`;
+      return `${displayNames}已被外部修改，请选择处理方式：`;
+    };
+
+    this.currentModal = Modal.confirm({
+      title: "文件已被外部修改",
+      content: buildModalContent(),
+      icon: null,
+      closable: true,
+      maskClosable: false,
+      footer: createElement(
+        Space,
+        {
+          style: { display: "flex", justifyContent: "flex-end", marginTop: 16 },
+        },
+        createElement(Button, { onClick: handleDismiss }, "稍后处理"),
+        createElement(Button, { onClick: handleAutoReload }, "自动重载"),
+        createElement(
+          Button,
+          { type: "primary", onClick: handleReloadAll },
+          "重新加载",
+        ),
+      ),
+      onCancel: () => {
+        this.currentModal = null;
+      },
+    });
+  }
+
+  /**
+   * 更新已显示的文件变更 Modal 内容
+   */
+  private updateFileChangedModal(): void {
+    if (!this.currentModal) return;
+
+    this.currentModal.destroy();
+    this.currentModal = null;
+    this.showFileChangedModal();
+  }
+
+  // ========== 静态方法：保存确认机制 ==========
+
+  /**
+   * 注册保存回调，返回 Promise 等待后端确认
+   * @param filePath 文件路径
+   * @returns Promise<boolean> 保存是否成功
+   */
+  static waitForSaveAck(filePath: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      // 设置超时
+      const timeout = setTimeout(() => {
+        // 超时后移除回调并返回失败
+        FileProtocol.pendingSaveCallbacks.delete(filePath);
+        console.warn(`[FileProtocol] 等待保存确认超时: ${filePath}`);
+        resolve(false);
+      }, FileProtocol.SAVE_ACK_TIMEOUT);
+
+      // 存储回调
+      FileProtocol.pendingSaveCallbacks.set(filePath, { resolve, timeout });
+    });
+  }
+
+  /**
+   * 解析等待中的保存回调
+   * @param filePath 文件路径
+   * @param success 是否成功
+   */
+  private static resolveSaveCallback(filePath: string, success: boolean): void {
+    const callback = FileProtocol.pendingSaveCallbacks.get(filePath);
+    if (callback) {
+      clearTimeout(callback.timeout);
+      FileProtocol.pendingSaveCallbacks.delete(filePath);
+      callback.resolve(success);
+    }
+  }
+
+  /**
+   * 清理所有等待中的保存回调，用于断开连接时
+   */
+  static clearAllPendingCallbacks(): void {
+    FileProtocol.pendingSaveCallbacks.forEach((callback) => {
+      clearTimeout(callback.timeout);
+      callback.resolve(false);
+    });
+    FileProtocol.pendingSaveCallbacks.clear();
+  }
+}

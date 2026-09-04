@@ -1,0 +1,339 @@
+/**
+ * 分享工具模块 - 用于生成和解析分享链接
+ *
+ * 使用 lz-string 压缩 pipeline JSON，通过 URL 参数分享
+ */
+
+import LZString from "lz-string";
+import { flowToPipeline, pipelineToFlow } from "../../core/parser";
+import { message } from "antd";
+
+// URL 参数名
+const SHARE_PARAM = "shared";
+const IMPORT_PARAM = "import";
+const IMPORT_FILE_PARAM = "file";
+
+// 版本号
+const SHARE_VERSION = 1;
+
+/**
+ * 预定义起始目录类型
+ */
+export type StartInDirectory =
+  | "desktop"
+  | "documents"
+  | "downloads"
+  | "music"
+  | "pictures"
+  | "videos";
+
+/**
+ * 编码分享内容
+ * @param pipelineObj pipeline 对象
+ * @returns 压缩后的字符串
+ */
+function encodeShareContent(pipelineObj: any): string {
+  // 包装版本号
+  const payload = {
+    v: SHARE_VERSION,
+    d: pipelineObj,
+  };
+  const jsonString = JSON.stringify(payload);
+  // 压缩字符串
+  const compressed = LZString.compressToEncodedURIComponent(jsonString);
+  return compressed;
+}
+
+/**
+ * 解码分享内容
+ * @param compressed 压缩字符串
+ * @returns pipeline 对象，失败返回 null
+ */
+function decodeShareContent(compressed: string): any | null {
+  try {
+    const jsonString = LZString.decompressFromEncodedURIComponent(compressed);
+    if (!jsonString) {
+      console.error("[shareHelper] 解压失败：结果为空");
+      return null;
+    }
+    const payload = JSON.parse(jsonString);
+
+    // 版本检查
+    if (payload.v !== SHARE_VERSION) {
+      console.warn(
+        `[shareHelper] 分享版本不匹配: ${payload.v} !== ${SHARE_VERSION}`,
+      );
+    }
+
+    return payload.d;
+  } catch (err) {
+    console.error("[shareHelper] 解码失败:", err);
+    return null;
+  }
+}
+
+/**
+ * 生成分享链接并复制到剪贴板
+ * @returns 是否成功
+ */
+export async function generateShareLink(): Promise<boolean> {
+  try {
+    // 强制使用集成模式编译当前 pipeline
+    const pipelineObj = flowToPipeline({ forceExportConfig: true });
+
+    if (!pipelineObj || Object.keys(pipelineObj).length === 0) {
+      message.warning("当前画布为空，无法生成分享链接");
+      return false;
+    }
+
+    // 压缩编码
+    const compressed = encodeShareContent(pipelineObj);
+
+    // 构建 URL
+    const baseUrl = window.location.origin + window.location.pathname;
+    const shareUrl = `${baseUrl}?${SHARE_PARAM}=${compressed}`;
+
+    // 检查 URL 长度
+    if (shareUrl.length > 6 * 1000 * 1000) {
+      message.warning(
+        `分享链接过长（${Math.round(
+          shareUrl.length / 1000,
+        )}KB），可能在某些浏览器中无法正常使用`,
+      );
+    }
+
+    // 复制到剪贴板
+    await navigator.clipboard.writeText(shareUrl);
+    message.success("分享链接已复制到剪贴板");
+
+    return true;
+  } catch (err) {
+    console.error("[shareHelper] 生成分享链接失败:", err);
+    message.error("生成分享链接失败");
+    return false;
+  }
+}
+
+/**
+ * 检查 URL 是否包含分享参数
+ * @returns 分享参数值，不存在返回 null
+ */
+export function getShareParam(): string | null {
+  const urlParams = new URLSearchParams(window.location.search);
+  return urlParams.get(SHARE_PARAM);
+}
+
+/**
+ * 检查 URL 是否包含导入参数
+ * @returns 起始目录值，不存在返回 null
+ */
+export function getImportParam(): StartInDirectory | null {
+  const urlParams = new URLSearchParams(window.location.search);
+  const value = urlParams.get(IMPORT_PARAM);
+
+  // 验证是否为有效的起始目录
+  const validDirs: StartInDirectory[] = [
+    "desktop",
+    "documents",
+    "downloads",
+    "music",
+    "pictures",
+    "videos",
+  ];
+
+  if (value && validDirs.includes(value as StartInDirectory)) {
+    return value as StartInDirectory;
+  }
+  return null;
+}
+
+/**
+ * 获取 URL 中期望的文件名参数
+ * @returns 文件名，不存在返回 null
+ */
+export function getImportFileParam(): string | null {
+  const urlParams = new URLSearchParams(window.location.search);
+  return urlParams.get(IMPORT_FILE_PARAM);
+}
+
+/**
+ * 清除 URL 中的导入参数
+ */
+export function clearImportParam(): void {
+  const url = new URL(window.location.href);
+  url.searchParams.delete(IMPORT_PARAM);
+  url.searchParams.delete(IMPORT_FILE_PARAM);
+  window.history.replaceState({}, "", url.toString());
+}
+
+/**
+ * 检查是否有待处理的导入请求
+ * 用于页面加载时检测，返回导入信息供 UI 显示确认
+ */
+export function checkPendingImport(): {
+  hasPending: boolean;
+  startIn: StartInDirectory | null;
+  expectedFile: string | null;
+} {
+  const startIn = getImportParam();
+  const expectedFile = getImportFileParam();
+  return {
+    hasPending: startIn !== null,
+    startIn,
+    expectedFile,
+  };
+}
+
+/**
+ * 处理导入请求
+ * @returns 是否成功导入
+ */
+export async function handleImportFromUrl(): Promise<boolean> {
+  const startIn = getImportParam();
+
+  if (!startIn) {
+    return false;
+  }
+
+  // 清除参数
+  clearImportParam();
+
+  // 执行导入
+  return importFromLocalFile(startIn);
+}
+
+/**
+ * 从 URL 加载分享内容
+ * @returns 是否成功加载
+ */
+export async function loadFromShareUrl(): Promise<boolean> {
+  const shareParam = getShareParam();
+  if (!shareParam) {
+    return false;
+  }
+
+  try {
+    // 解码
+    const pipelineObj = decodeShareContent(shareParam);
+    if (!pipelineObj) {
+      message.error("分享链接解析失败，请检查链接是否完整");
+      clearShareParam();
+      return false;
+    }
+
+    // 新建文件
+    const { useFileStore } = await import("@/stores/project/fileStore");
+    const newFileName = useFileStore.getState().addFile({ isSwitch: true });
+
+    if (!newFileName) {
+      message.error("创建新文件失败");
+      clearShareParam();
+      return false;
+    }
+
+    // 导入到新文件
+    const pString = JSON.stringify(pipelineObj);
+    const success = await pipelineToFlow({ pString });
+
+    if (success) {
+      message.success("已从分享链接加载 Pipeline");
+      // 清除 URL 参数
+      clearShareParam();
+      return true;
+    } else {
+      message.error("分享内容导入失败");
+      clearShareParam();
+      return false;
+    }
+  } catch (err) {
+    console.error("[shareHelper] 加载分享内容失败:", err);
+    message.error("分享链接解析失败");
+    clearShareParam();
+    return false;
+  }
+}
+
+/**
+ * 清除 URL 中的分享参数
+ */
+function clearShareParam(): void {
+  const url = new URL(window.location.href);
+  url.searchParams.delete(SHARE_PARAM);
+  window.history.replaceState({}, "", url.toString());
+}
+
+// ============ 本地文件导入 ============
+
+/**
+ * 从本地文件导入 Pipeline
+ * 使用 File System Access API 让用户选择文件
+ * @param startIn 起始目录（可选），如 'downloads'、'documents' 等
+ * @returns 是否成功导入
+ */
+export async function importFromLocalFile(
+  startIn?: StartInDirectory,
+): Promise<boolean> {
+  // 检查浏览器是否支持 File System Access API
+  if (!("showOpenFilePicker" in window)) {
+    message.warning("当前浏览器不支持文件选择功能，请使用 Chrome/Edge 浏览器");
+    return false;
+  }
+
+  try {
+    // 打开文件选择器
+    const [fileHandle] = await (window as any).showOpenFilePicker({
+      startIn: startIn || "downloads",
+      types: [
+        {
+          description: "JSON Files",
+          accept: {
+            "application/json": [".json", ".jsonc"],
+          },
+        },
+      ],
+      multiple: false,
+    });
+
+    // 读取文件内容
+    const file = await fileHandle.getFile();
+    const content = await file.text();
+
+    // 解析 JSON
+    let pipelineObj;
+    try {
+      pipelineObj = JSON.parse(content);
+    } catch {
+      message.error("文件内容不是有效的 JSON 格式");
+      return false;
+    }
+
+    // 新建文件用于加载内容
+    const { useFileStore } = await import("@/stores/project/fileStore");
+    const newFileName = useFileStore.getState().addFile({ isSwitch: true });
+
+    if (!newFileName) {
+      message.error("创建新文件失败");
+      return false;
+    }
+
+    // 导入到新文件
+    const pString = JSON.stringify(pipelineObj);
+    const success = await pipelineToFlow({ pString });
+
+    if (success) {
+      message.success(`已从 ${file.name} 导入 Pipeline`);
+      return true;
+    } else {
+      message.error("文件导入失败");
+      return false;
+    }
+  } catch (err: any) {
+    // 用户取消选择不显示错误
+    if (err?.name === "AbortError") {
+      return false;
+    }
+    console.error("[shareHelper] 导入文件失败:", err);
+    message.error("导入文件失败");
+    return false;
+  }
+}

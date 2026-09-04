@@ -1,0 +1,743 @@
+import style from "../styles/layout/Flow.module.less";
+import "@xyflow/react/dist/style.css";
+
+import {
+  useCallback,
+  useRef,
+  useEffect,
+  useMemo,
+  memo,
+  useState,
+  type RefObject,
+} from "react";
+import {
+  ReactFlow,
+  Controls,
+  Background,
+  useOnViewportChange,
+  useReactFlow,
+  type NodeChange,
+  type EdgeChange,
+  type Connection,
+  type FinalConnectionState,
+  type OnConnectStartParams,
+  type Viewport,
+  type OnSelectionChangeParams,
+  useKeyPress,
+} from "@xyflow/react";
+import { useDebounceFn } from "ahooks";
+
+import { useFlowStore, type EdgeType, type NodeType } from "../stores/flow";
+import { useShallow } from "zustand/shallow";
+import { useClipboardStore } from "@/stores/flow/clipboardStore";
+import { nodeTypes } from "./flow/nodes";
+import { NodeTypeEnum } from "./flow/nodes/constants";
+import { edgeTypes } from "./flow/edges";
+import { AvoidanceRoutingProvider } from "./flow/avoidanceRoutingContext";
+import { SelectionContextMenu } from "./flow/components/SelectionContextMenu";
+import { CanvasNodeContextMenu } from "./flow/nodes/components/CanvasNodeContextMenu";
+import { useFileStore } from "@/stores/project/fileStore";
+import NodeAddPanel, {
+  type QuickCreateConnection,
+} from "./panels/main/NodeAddPanel";
+import InlineFieldPanel from "./panels/main/InlineFieldPanel";
+import InlineEdgePanel from "./panels/main/InlineEdgePanel";
+import { useConfigStore } from "@/stores/app/configStore";
+import SnapGuidelines from "./flow/SnapGuidelines";
+import { useNodeSnap } from "./flow/useNodeSnap";
+import { useEmbedMode } from "../hooks/useEmbedMode";
+import { sendToParent } from "../utils/embedBridge";
+import { useCanvasMotionPause } from "../hooks/useCanvasMotionPause";
+import { CanvasMotionContext } from "./flow/canvasMotionContext";
+
+/**工作流 */
+// 按键监听
+const KeyListener = memo(
+  ({
+    targetRef,
+    allowCopy,
+  }: {
+    targetRef: RefObject<HTMLDivElement | null>;
+    allowCopy: boolean;
+  }) => {
+    const isTextEditorFocused = useCallback(() => {
+      const target = document.activeElement;
+      if (!(target instanceof HTMLElement)) {
+        return false;
+      }
+      const tagName = target.tagName.toLowerCase();
+      if (
+        tagName === "input" ||
+        tagName === "textarea" ||
+        target.isContentEditable
+      ) {
+        return true;
+      }
+      return Boolean(
+        target.closest('[contenteditable="true"]') ||
+          target.closest(".monaco-editor"),
+      );
+    }, []);
+    const { selectedNodes, selectedEdges } = useFlowStore(
+      useShallow((state) => ({
+        selectedNodes: state.selectedNodes,
+        selectedEdges: state.selectedEdges,
+      })),
+    );
+    const { copy, clipboardNodes, paste } = useClipboardStore(
+      useShallow((state) => ({
+        copy: state.copy,
+        clipboardNodes: state.clipboardNodes,
+        paste: state.paste,
+      })),
+    );
+    const flowPaste = useFlowStore((state) => state.paste);
+
+    const keyPressOptions = useMemo(
+      () => ({
+        target: targetRef.current,
+        actInsideInputWithModifier: false,
+      }),
+      [targetRef],
+    );
+
+    // 复制节点
+    const copyPressed = useKeyPress("Control+c", keyPressOptions);
+    useEffect(() => {
+      if (
+        !allowCopy ||
+        !copyPressed ||
+        selectedNodes.length === 0 ||
+        isTextEditorFocused()
+      ) {
+        return;
+      }
+      void copy(selectedNodes, selectedEdges);
+    }, [allowCopy, copy, copyPressed, isTextEditorFocused, selectedEdges, selectedNodes]);
+
+    // 粘贴节点
+    const pastePressed = useKeyPress("Control+v", keyPressOptions);
+    useEffect(() => {
+      if (
+        !allowCopy ||
+        !pastePressed ||
+        clipboardNodes.length === 0 ||
+        isTextEditorFocused()
+      ) {
+        return;
+      }
+      const content = paste();
+      if (content) {
+        void flowPaste(content.nodes, content.edges);
+      }
+    }, [allowCopy, clipboardNodes, flowPaste, isTextEditorFocused, paste, pastePressed]);
+
+    return null;
+  },
+);
+// 实例监视器
+const InstanceMonitor = memo(() => {
+  const updateInstance = useFlowStore((state) => state.updateInstance);
+  const instance = useReactFlow();
+  useEffect(() => {
+    updateInstance(instance);
+  }, [instance, updateInstance]);
+  return null;
+});
+// 视口监视器
+const ViewportChangeMonitor = memo(() => {
+  const updateViewport = useFlowStore((state) => state.updateViewport);
+  const setFileConfig = useFileStore((state) => state.setFileConfig);
+  useOnViewportChange({
+    onEnd: (viewport: Viewport) => {
+      updateViewport(viewport);
+      // 保存视口位置到当前文件配置
+      setFileConfig("savedViewport", { ...viewport });
+    },
+  });
+  return null;
+});
+// 节点添加面板控制器
+interface NodeAddPanelControllerProps {
+  visible: boolean;
+  screenPos: { x: number; y: number };
+  quickCreateConnection: QuickCreateConnection | null;
+  setScreenPos: (pos: { x: number; y: number }) => void;
+  onClose: () => void;
+}
+const NodeAddPanelController = memo(
+  ({
+    visible,
+    screenPos,
+    quickCreateConnection,
+    setScreenPos,
+    onClose,
+  }: NodeAddPanelControllerProps) => {
+    const { screenToFlowPosition } = useReactFlow();
+
+    // 实时计算 flow 坐标
+    const flowPos = useMemo(() => {
+      if (!visible) return undefined;
+      return screenToFlowPosition(screenPos);
+    }, [visible, screenPos, screenToFlowPosition]);
+
+    // 在新位置重新打开
+    const handleReopen = useCallback(
+      (newPos: { x: number; y: number }) => {
+        setScreenPos(newPos);
+      },
+      [setScreenPos],
+    );
+
+    return (
+      <NodeAddPanel
+        visible={visible}
+        position={screenPos}
+        flowPosition={flowPos}
+        quickCreateConnection={quickCreateConnection}
+        onClose={onClose}
+        onReopen={handleReopen}
+      />
+    );
+  },
+);
+
+function MainFlow() {
+  const {
+    nodes,
+    edges,
+    updateNodes,
+    updateEdges,
+    addEdge,
+    updateSize,
+    updateSelection,
+    attachNodeToGroup,
+    detachNodeFromGroup,
+  } = useFlowStore(
+    useShallow((state) => ({
+      nodes: state.nodes,
+      edges: state.edges,
+      updateNodes: state.updateNodes,
+      updateEdges: state.updateEdges,
+      addEdge: state.addEdge,
+      updateSize: state.updateSize,
+      updateSelection: state.updateSelection,
+      attachNodeToGroup: state.attachNodeToGroup,
+      detachNodeFromGroup: state.detachNodeFromGroup,
+    })),
+  );
+  const canvasBackgroundMode = useConfigStore(
+    (state) => state.configs.canvasBackgroundMode,
+  );
+  const showNodeShadows = useConfigStore(
+    (state) => state.configs.showNodeShadows,
+  );
+  const enableNodeSnap = useConfigStore(
+    (state) => state.configs.enableNodeSnap,
+  );
+  const snapOnlyInViewport = useConfigStore(
+    (state) => state.configs.snapOnlyInViewport,
+  );
+  const quickCreateNodeOnConnectBlank = useConfigStore(
+    (state) => state.configs.quickCreateNodeOnConnectBlank,
+  );
+  const edgePathMode = useConfigStore((state) => state.configs.edgePathMode);
+  const enableCanvasMotionPause = useConfigStore(
+    (state) => state.configs.enableCanvasMotionPause,
+  );
+
+  // 嵌入模式权限控制
+  const { isEmbed, isCapAllowed } = useEmbedMode();
+  const readOnly = isEmbed && isCapAllowed("readOnly");
+  const allowCopy = !isEmbed || isCapAllowed("allowCopy");
+
+  const selfElem = useRef<HTMLDivElement>(null);
+  const pendingConnectionRef = useRef<OnConnectStartParams | null>(null);
+  const connectionCompletedRef = useRef(false);
+  const suppressNextPaneClickRef = useRef(false);
+
+  const ref = useRef<HTMLDivElement>(null);
+  const { beginCanvasMotionPause, endCanvasMotionPause } =
+    useCanvasMotionPause(ref, enableCanvasMotionPause);
+  const canvasMotionContext = useMemo(
+    () => ({ beginCanvasMotionPause, endCanvasMotionPause }),
+    [beginCanvasMotionPause, endCanvasMotionPause],
+  );
+  const pauseViewportMotion = useCallback(
+    () => beginCanvasMotionPause("viewport"),
+    [beginCanvasMotionPause],
+  );
+  const resumeViewportMotion = useCallback(
+    () => endCanvasMotionPause("viewport"),
+    [endCanvasMotionPause],
+  );
+  const pauseSelectionDragMotion = useCallback(
+    () => beginCanvasMotionPause("selection-drag"),
+    [beginCanvasMotionPause],
+  );
+  const resumeSelectionDragMotion = useCallback(
+    () => endCanvasMotionPause("selection-drag"),
+    [endCanvasMotionPause],
+  );
+
+  // 节点添加面板状态
+  const [nodeAddPanelVisible, setNodeAddPanelVisible] = useState(false);
+  const [nodeAddPanelPos, setNodeAddPanelPos] = useState({ x: 0, y: 0 });
+  const [quickCreateConnection, setQuickCreateConnection] =
+    useState<QuickCreateConnection | null>(null);
+
+  const {
+    guidelines: snapGuidelines,
+    start: startNodeSnap,
+    update: updateNodeSnap,
+    stop: stopNodeSnap,
+  } = useNodeSnap({
+    enabled: enableNodeSnap,
+    onlyInViewport: snapOnlyInViewport,
+    updateNodes,
+  });
+
+  // 选区右键菜单
+  const [selectionMenuPos, setSelectionMenuPos] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
+
+  // 节点右键菜单状态由画布统一持有，避免每个节点创建 Dropdown 和 Modal。
+  const [nodeContextMenu, setNodeContextMenu] = useState<{
+    nodeId: string;
+    position: { x: number; y: number };
+    open: boolean;
+  } | null>(null);
+
+  // 回调
+  const onNodesChange = useCallback(
+    (changes: NodeChange[]) => {
+      if (readOnly) {
+        // 过滤掉添加/删除/位置变更等修改性操作
+        const blocked = changes.filter(
+          (c) =>
+            c.type === "remove" ||
+            c.type === "add" ||
+            c.type === "position" ||
+            c.type === "dimensions",
+        );
+        if (blocked.length > 0) {
+          sendToParent("mpe:error", {
+            code: "capability_denied",
+            message: "当前为只读模式，禁止修改节点",
+          });
+          // 仅允许 select 类型变更通过
+          const allowed = changes.filter((c) => c.type === "select");
+          if (allowed.length > 0) updateNodes(allowed);
+          return;
+        }
+      }
+      updateNodes(changes);
+    },
+    [updateNodes, readOnly],
+  );
+  const onEdgesChange = useCallback(
+    (changes: EdgeChange[]) => {
+      if (readOnly) {
+        const blocked = changes.filter(
+          (c) => c.type === "remove" || c.type === "add",
+        );
+        if (blocked.length > 0) {
+          sendToParent("mpe:error", {
+            code: "capability_denied",
+            message: "当前为只读模式，禁止修改边",
+          });
+          const allowed = changes.filter((c) => c.type === "select");
+          if (allowed.length > 0) updateEdges(allowed);
+          return;
+        }
+      }
+      updateEdges(changes);
+    },
+    [updateEdges, readOnly],
+  );
+  const onConnect = useCallback(
+    (co: Connection) => {
+      if (readOnly) {
+        sendToParent("mpe:error", {
+          code: "capability_denied",
+          message: "当前为只读模式，禁止添加连接",
+        });
+        return;
+      }
+      connectionCompletedRef.current = true;
+      addEdge(co);
+    },
+    [addEdge, readOnly],
+  );
+  const onConnectStart = useCallback(
+    (_event: MouseEvent | TouchEvent, params: OnConnectStartParams) => {
+      beginCanvasMotionPause("connection");
+      pendingConnectionRef.current = params;
+      connectionCompletedRef.current = false;
+    },
+    [beginCanvasMotionPause],
+  );
+  const onConnectEnd = useCallback(
+    (
+      event: MouseEvent | TouchEvent,
+      connectionState?: FinalConnectionState,
+    ) => {
+      endCanvasMotionPause("connection");
+      if (readOnly) return;
+
+      const connectStart = pendingConnectionRef.current;
+      pendingConnectionRef.current = null;
+
+      if (
+        !quickCreateNodeOnConnectBlank ||
+        !connectStart ||
+        connectionCompletedRef.current
+      ) {
+        connectionCompletedRef.current = false;
+        return;
+      }
+
+      const endedOnBlank =
+        !connectionState ||
+        (!connectionState.isValid &&
+          !connectionState.toNode &&
+          !connectionState.toHandle);
+
+      if (!endedOnBlank) {
+        connectionCompletedRef.current = false;
+        return;
+      }
+
+      const clientX =
+        "changedTouches" in event
+          ? event.changedTouches[0]?.clientX
+          : event.clientX;
+      const clientY =
+        "changedTouches" in event
+          ? event.changedTouches[0]?.clientY
+          : event.clientY;
+
+      if (
+        clientX == null ||
+        clientY == null ||
+        !connectStart.nodeId ||
+        !connectStart.handleId ||
+        connectStart.handleType !== "source"
+      ) {
+        connectionCompletedRef.current = false;
+        return;
+      }
+
+      suppressNextPaneClickRef.current = true;
+      setQuickCreateConnection({
+        source: connectStart.nodeId,
+        sourceHandle: connectStart.handleId,
+      });
+      setNodeAddPanelPos({ x: clientX, y: clientY });
+      setNodeAddPanelVisible(true);
+
+      connectionCompletedRef.current = false;
+    },
+    [endCanvasMotionPause, quickCreateNodeOnConnectBlank, readOnly],
+  );
+  const onSelectionChange = useCallback(
+    (params: OnSelectionChangeParams) => {
+      updateSelection(params.nodes as NodeType[], params.edges as EdgeType[]);
+    },
+    [updateSelection],
+  );
+
+  // 双击空白区域打开节点添加面板
+  const onPaneClick = useCallback(
+    () => {
+      if (suppressNextPaneClickRef.current) {
+        suppressNextPaneClickRef.current = false;
+        return;
+      }
+
+      // 单击关闭面板
+      if (nodeAddPanelVisible) {
+        setNodeAddPanelVisible(false);
+        setQuickCreateConnection(null);
+      }
+      setNodeContextMenu((current) =>
+        current ? { ...current, open: false } : null,
+      );
+    },
+    [nodeAddPanelVisible],
+  );
+
+  // 双击处理
+  const onDoubleClick = useCallback(
+    (event: React.MouseEvent | MouseEvent) => {
+      if (readOnly) return;
+      setNodeContextMenu(null);
+      setQuickCreateConnection(null);
+      setNodeAddPanelPos({ x: event.clientX, y: event.clientY });
+      setNodeAddPanelVisible(true);
+    },
+    [readOnly],
+  );
+
+  // 右键空白区域打开节点添加面板
+  const onPaneContextMenu = useCallback(
+    (event: React.MouseEvent | MouseEvent) => {
+      if (readOnly) return;
+      event.preventDefault();
+      setNodeContextMenu(null);
+      setQuickCreateConnection(null);
+      setNodeAddPanelPos({ x: event.clientX, y: event.clientY });
+      setNodeAddPanelVisible(true);
+    },
+    [readOnly],
+  );
+
+  // 节点右键菜单使用固定屏幕坐标定位，菜单内容由单例宿主渲染。
+  const onNodeContextMenu = useCallback(
+    (event: React.MouseEvent, node: NodeType) => {
+      event.preventDefault();
+      setNodeAddPanelVisible(false);
+      setQuickCreateConnection(null);
+      setNodeContextMenu({
+        nodeId: node.id,
+        position: { x: event.clientX, y: event.clientY },
+        open: true,
+      });
+    },
+    [],
+  );
+
+  const onNodeContextMenuOpenChange = useCallback((open: boolean) => {
+    setNodeContextMenu((current) =>
+      current ? { ...current, open } : current,
+    );
+  }, []);
+
+  // 关闭节点添加面板
+  const closeNodeAddPanel = useCallback(() => {
+    setNodeAddPanelVisible(false);
+    setQuickCreateConnection(null);
+  }, []);
+
+  const onNodeDragStart = useCallback(
+    (
+      _event: React.MouseEvent,
+      draggedNode: NodeType,
+      eventDraggedNodes: NodeType[],
+    ) => {
+      beginCanvasMotionPause("node-drag");
+      startNodeSnap(draggedNode, eventDraggedNodes);
+    },
+    [beginCanvasMotionPause, startNodeSnap],
+  );
+
+  // 节点拖拽磁吸对齐
+  const onNodeDrag = useCallback(
+    (
+      _event: React.MouseEvent,
+      draggedNode: NodeType,
+      eventDraggedNodes: NodeType[],
+    ) => {
+      updateNodeSnap(draggedNode, eventDraggedNodes);
+    },
+    [updateNodeSnap],
+  );
+
+  const onNodeDragStop = useCallback(
+    (
+      _event: React.MouseEvent,
+      draggedNode: NodeType,
+      eventDraggedNodes: NodeType[],
+    ) => {
+      endCanvasMotionPause("node-drag");
+      stopNodeSnap(draggedNode, eventDraggedNodes);
+
+      // 拖入/拖出分组检测
+      if (draggedNode.type === NodeTypeEnum.Group) return;
+      const currentNodes = useFlowStore.getState().nodes;
+      const selectedNodes = useFlowStore.getState().selectedNodes;
+      const rfInstance = useFlowStore.getState().instance;
+
+      // 获取需要处理的节点：所有选中的非分组节点
+      const nodesToProcess = selectedNodes.filter(
+        (n) => n.type !== NodeTypeEnum.Group,
+      );
+      if (nodesToProcess.length === 0 || !rfInstance) return;
+
+      nodesToProcess.forEach((node) => {
+        // 获取最新的节点数据
+        const currentNode = currentNodes.find((n) => n.id === node.id);
+        if (!currentNode) return;
+
+        const hasParent = !!(currentNode as any).parentId;
+
+        if (hasParent) {
+          // 检测是否拖出了父 Group 的范围
+          const parentId = (currentNode as any).parentId;
+          const parentNode = currentNodes.find((n) => n.id === parentId);
+          if (parentNode) {
+            // 优先使用测量尺寸
+            const pw =
+              parentNode.measured?.width ??
+              (parentNode as any).style?.width ??
+              400;
+            const ph =
+              parentNode.measured?.height ??
+              (parentNode as any).style?.height ??
+              300;
+            const nx = currentNode.position.x;
+            const ny = currentNode.position.y;
+            const nw = currentNode.measured?.width ?? 200;
+            const nh = currentNode.measured?.height ?? 100;
+
+            // 如果节点中心在 parent 外部则脱离
+            const cx = nx + nw / 2;
+            const cy = ny + nh / 2;
+
+            if (cx < 0 || cy < 0 || cx > pw || cy > ph) {
+              detachNodeFromGroup(currentNode.id);
+            }
+          }
+        } else {
+          const intersecting = rfInstance.getIntersectingNodes(
+            currentNode as any,
+          );
+          const groupHit = intersecting.find(
+            (n: any) => n.type === NodeTypeEnum.Group,
+          );
+          if (groupHit) {
+            attachNodeToGroup(currentNode.id, groupHit.id);
+          }
+        }
+      });
+    },
+    [
+      stopNodeSnap,
+      attachNodeToGroup,
+      detachNodeFromGroup,
+      endCanvasMotionPause,
+    ],
+  );
+
+  // 选区右键菜单
+  const onSelectionContextMenu = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    setSelectionMenuPos({ x: event.clientX, y: event.clientY });
+  }, []);
+
+  const onSelectionMenuOpenChange = useCallback((open: boolean) => {
+    if (!open) {
+      setSelectionMenuPos(null);
+    }
+  }, []);
+
+  const defaultViewport = useMemo(() => ({ x: 0, y: 0, zoom: 1.5 }), []);
+
+  // 背景颜色
+  const backgroundColor = useMemo(() => {
+    return canvasBackgroundMode === "pure" ? "#ffffff" : "#f9fafd";
+  }, [canvasBackgroundMode]);
+
+  // hook
+  const { run: updateCanvasSize } = useDebounceFn(
+    (width: number, height: number) => updateSize(width, height),
+    { wait: 300 },
+  );
+
+  useEffect(() => {
+    const element = ref.current;
+    const observer = new ResizeObserver((entries) => {
+      entries.forEach((e) => {
+        const { width, height } = e.contentRect;
+        updateCanvasSize(width, height);
+      });
+    });
+    if (element) {
+      observer.observe(element);
+    }
+    return () => {
+      observer.disconnect();
+    };
+  }, [updateCanvasSize]);
+
+  // 渲染
+  return (
+    <div
+      className={style.editor}
+      data-node-shadows={showNodeShadows}
+      ref={ref}
+    >
+      <CanvasMotionContext.Provider value={canvasMotionContext}>
+        <AvoidanceRoutingProvider enabled={edgePathMode === "avoid"}>
+          <ReactFlow
+            ref={selfElem}
+            nodeTypes={nodeTypes}
+            nodes={nodes}
+            onNodesChange={onNodesChange}
+            edgeTypes={edgeTypes}
+            edges={edges}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            onConnectStart={onConnectStart}
+            onConnectEnd={onConnectEnd}
+            onMoveStart={pauseViewportMotion}
+            onMoveEnd={resumeViewportMotion}
+            onNodeDragStart={onNodeDragStart}
+            onSelectionChange={onSelectionChange}
+            onSelectionDragStart={pauseSelectionDragMotion}
+            onSelectionDragStop={resumeSelectionDragMotion}
+            defaultViewport={defaultViewport}
+            minZoom={0.2}
+            maxZoom={2.5}
+            onPaneClick={onPaneClick}
+            onDoubleClick={onDoubleClick}
+            onPaneContextMenu={onPaneContextMenu}
+            onNodeContextMenu={onNodeContextMenu}
+            onSelectionContextMenu={onSelectionContextMenu}
+            onNodeDrag={onNodeDrag}
+            onNodeDragStop={onNodeDragStop}
+            nodesDraggable={!readOnly}
+            nodesConnectable={!readOnly}
+            elementsSelectable={true}
+            autoPanOnConnect={false}
+            autoPanOnNodeDrag={false}
+            preventScrolling={true}
+            elevateNodesOnSelect={true}
+          >
+            <Background bgColor={backgroundColor} />
+            <Controls orientation="vertical" />
+            <InstanceMonitor />
+            <ViewportChangeMonitor />
+            <KeyListener targetRef={selfElem} allowCopy={allowCopy} />
+            <NodeAddPanelController
+              visible={nodeAddPanelVisible}
+              screenPos={nodeAddPanelPos}
+              quickCreateConnection={quickCreateConnection}
+              setScreenPos={setNodeAddPanelPos}
+              onClose={closeNodeAddPanel}
+            />
+            <InlineFieldPanel />
+            <InlineEdgePanel />
+            <SnapGuidelines guidelines={snapGuidelines} />
+          </ReactFlow>
+        </AvoidanceRoutingProvider>
+      </CanvasMotionContext.Provider>
+      <CanvasNodeContextMenu
+        nodeId={nodeContextMenu?.nodeId ?? null}
+        position={nodeContextMenu?.position ?? null}
+        open={nodeContextMenu?.open ?? false}
+        onOpenChange={onNodeContextMenuOpenChange}
+      />
+      {/* 选区右键菜单 */}
+      <SelectionContextMenu
+        position={selectionMenuPos}
+        open={!!selectionMenuPos}
+        onOpenChange={onSelectionMenuOpenChange}
+      />
+    </div>
+  );
+}
+
+export default MainFlow;

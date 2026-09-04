@@ -1,0 +1,192 @@
+.panel {
+  position: absolute;
+  z-index: 10;
+  background-color: #fff;
+  border-radius: 8px;
+  overflow: hidden;
+  border-right: solid 1px #ccc;
+  box-shadow: 0 0 5px #ccc;
+  display: flex;
+
+  @tool-item-size: 52px;
+
+  .item {
+    width: @tool-item-size;
+    height: @tool-item-size;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    cursor: pointer;
+    position: relative;
+
+    .icon {
+      transition: all 0.2s ease;
+
+      &:hover {
+        transform: scale(1.1);
+      }
+    }
+  }
+
+  .devider {
+    width: 100%;
+    height: 4px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+
+    > div {
+      background-color: rgba(gray, 0.3);
+      border-radius: 60px;
+      width: 72%;
+      height: 50%;
+    }
+  }
+
+  // 底部提示分割线
+  .hintDivider {
+    width: 100%;
+    height: 4px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+
+    > div {
+      background-color: rgba(gray, 0.2);
+      border-radius: 60px;
+      width: 72%;
+      height: 50%;
+    }
+  }
+
+  // 底部提示项
+  .hintItem {
+    width: 52px;
+    height: 52px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    cursor: default;
+    position: relative;
+
+    .hintIcon {
+      color: #999;
+      opacity: 0.6;
+    }
+
+    &:hover .hintIcon {
+      opacity: 1;
+      color: #666;
+    }
+  }
+}
+
+.h-panel {
+  .group {
+    display: flex;
+  }
+
+  .devider {
+    height: 100%;
+    width: 5px;
+
+    > div {
+      background-color: rgba(gray, 0.3);
+      border-radius: 60px;
+      height: 72%;
+      width: 50%;
+    }
+  }
+}
+
+.add-panel {
+  left: 10px;
+  // top: calc(50% - 52px);
+  // transform: translateY(-50%);
+  top: 136px;
+  flex-direction: column;
+}
+
+.global-panel {
+  top: 10px;
+  left: 10px;
+}
+
+.edit-panel {
+  top: 70px;
+  left: 10px;
+}
+
+/* 搜索面板 */
+.search-panel {
+  top: 70px;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  padding: 4px 4px;
+  gap: 8px;
+
+  .search-input {
+    width: 240px;
+  }
+
+  .search-buttons {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+
+    .search-icon {
+      cursor: pointer;
+      transition: all 0.2s ease;
+      padding: 4px;
+      border-radius: 4px;
+
+      &:hover {
+        transform: scale(1.1);
+      }
+    }
+
+    .devider {
+      height: 20px;
+      width: 5px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+
+      > div {
+        background-color: rgba(gray, 0.3);
+        border-radius: 60px;
+        height: 100%;
+        width: 2px;
+      }
+    }
+
+    .dropdown-icon {
+      cursor: pointer;
+      transition: all 0.2s ease;
+      padding: 6px;
+      border-radius: 4px;
+      color: #666;
+
+      &:hover {
+        background-color: rgba(0, 0, 0, 0.04);
+        color: #333;
+      }
+
+      &.active {
+        background-color: #e6f4ff;
+        color: #1890ff;
+      }
+    }
+  }
+}
+
+.layout-panel {
+  bottom: 20px;
+  right: 20px;
+}
+
+.debug-panel {
+  top: 80px;
+  left: 80px;
+}

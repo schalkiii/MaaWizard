@@ -1,0 +1,74 @@
+﻿import { Button, Space, Typography } from "antd";
+import { DebugArtifactPreview } from "./DebugArtifactPreview";
+import type { DebugArtifactEntry } from "@/stores/debug/debugArtifactStore";
+import type {
+  DebugImageOverlay,
+  DebugImageOverlayGroup,
+} from "./DebugImageViewer";
+
+const { Text } = Typography;
+
+export interface DebugArtifactSelectorGroup {
+  title: string;
+  refs: Array<{ ref: string; label: string }>;
+}
+
+export function DebugArtifactSelector({
+  box,
+  emptyText = "没有可查看的 artifact 引用。",
+  groups,
+  overlayGroups,
+  overlays,
+  requestArtifact,
+  selectedArtifact,
+}: {
+  box?: unknown;
+  emptyText?: string;
+  groups: DebugArtifactSelectorGroup[];
+  overlayGroups?: DebugImageOverlayGroup[];
+  overlays?: DebugImageOverlay[];
+  requestArtifact: (artifactId: string) => void;
+  selectedArtifact?: DebugArtifactEntry;
+}) {
+  const activeRefs = new Set(
+    groups.flatMap((group) => group.refs.map((item) => item.ref)),
+  );
+  const hasRefs = activeRefs.size > 0;
+  const selectedArtifactIsRelated =
+    selectedArtifact && activeRefs.has(selectedArtifact.ref.id);
+
+  if (!hasRefs) {
+    return <Text type="secondary">{emptyText}</Text>;
+  }
+
+  return (
+    <Space orientation="vertical" size={8} style={{ width: "100%" }}>
+      <Space wrap>
+        {groups.flatMap((group) =>
+          group.refs.map((item) => {
+            const active = item.ref === selectedArtifact?.ref.id;
+            return (
+              <Button
+                key={`${group.title}-${item.ref}`}
+                disabled={active}
+                size="small"
+                type={active ? "primary" : "default"}
+                onClick={() => requestArtifact(item.ref)}
+              >
+                {item.label}
+              </Button>
+            );
+          }),
+        )}
+      </Space>
+      {selectedArtifactIsRelated && (
+        <DebugArtifactPreview
+          artifact={selectedArtifact}
+          box={box}
+          overlayGroups={overlayGroups}
+          overlays={overlays}
+        />
+      )}
+    </Space>
+  );
+}
